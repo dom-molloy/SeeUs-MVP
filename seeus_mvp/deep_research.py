@@ -1,7 +1,11 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os
 import json
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List
+
 from prompts import SYSTEM
+
 
 DEEP_RESEARCH_SYSTEM = SYSTEM + """
 You produce a 'Relational Dynamics Brief' grounded ONLY in the provided answers and computed scores.
@@ -50,31 +54,67 @@ Write a deep, non-clinical research-style brief that:
 {output_spec}
 """
 
-def _get_client():
-    try:
-        from openai import OpenAI
-        return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        return None
 
-def _chat(client, model: str, system: str, user: str) -> str:
-    if client is not None:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            temperature=0.2,
-        )
-        return resp.choices[0].message.content
-    import openai
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    resp = openai.ChatCompletion.create(
+def _require_api_key() -> str:
+    key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
+    return key
+
+
+def _get_client():
+    # New SDK path (recommended)
+    from openai import OpenAI
+    return OpenAI(api_key=_require_api_key())
+
+
+def _strip_code_fences(s: str) -> str:
+    if not s:
+        return s
+    t = s.strip()
+    if t.startswith("```"):
+        # handles ```json ... ``` or ``` ... ```
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        if t.endswith("```"):
+            t = t.rsplit("```", 1)[0]
+    return t.strip()
+
+
+def _extract_json(raw: str) -> Dict[str, Any]:
+    """
+    Best-effort JSON extraction:
+    1) strip code fences
+    2) try whole string
+    3) fall back to first {...} block
+    """
+    raw = _strip_code_fences(raw)
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    s = raw.find("{")
+    e = raw.rfind("}")
+    if s != -1 and e != -1 and e > s:
+        return json.loads(raw[s : e + 1])
+
+    raise ValueError("Model did not return valid JSON.")
+
+
+def _chat(model: str, system: str, user: str) -> str:
+    client = _get_client()
+    resp = client.chat.completions.create(
         model=model,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
         temperature=0.2,
     )
-    return resp["choices"][0]["message"]["content"]
+    content = resp.choices[0].message.content
+    return content or ""
+
 
 def run_deep_research(
     mode: str,
@@ -84,25 +124,15 @@ def run_deep_research(
     deltas_over_time: List[Dict[str, Any]],
     model: str = "gpt-4o-mini",
 ) -> Dict[str, Any]:
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
-
-    client = _get_client()
     prompt = DEEP_RESEARCH_USER_PROMPT.format(
         mode=mode,
         scores_json=json.dumps(dimension_scores, ensure_ascii=False),
         quotes_json=json.dumps(key_quotes, ensure_ascii=False),
         contradictions_json=json.dumps(contradictions, ensure_ascii=False),
         deltas_json=json.dumps(deltas_over_time, ensure_ascii=False),
-        output_spec=DEEP_RESEARCH_OUTPUT_SPEC.strip()
+        output_spec=DEEP_RESEARCH_OUTPUT_SPEC.strip(),
     )
-    raw = _chat(client, model=model, system=DEEP_RESEARCH_SYSTEM, user=prompt)
 
-    try:
-        return json.loads(raw)
-    except Exception:
-        s = raw.find("{")
-        e = raw.rfind("}")
-        if s != -1 and e != -1 and e > s:
-            return json.loads(raw[s:e+1])
-        raise
+    raw = _chat(model=model, system=DEEP_RESEARCH_SYSTEM, user=prompt)
+    return _extract_json(raw)
+

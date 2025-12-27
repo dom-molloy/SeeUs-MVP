@@ -11,6 +11,24 @@ from db import (
     list_growth_reflections, save_growth_reflection,
 )
 
+# -------------------- Row-safe helpers --------------------
+def _rget(row, key: str, default=None):
+    """
+    Safe getter for both dict and sqlite3.Row.
+    sqlite3.Row supports: row["col"] and row.keys()
+    """
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    if hasattr(row, "keys"):  # sqlite3.Row
+        try:
+            return row[key] if key in row.keys() else default
+        except Exception:
+            return default
+    return default
+
+
 def _mini_bar(label: str, value_0_5: int, help_text: str = ""):
     value_0_5 = max(0, min(5, int(value_0_5)))
     blocks = "▓" * value_0_5 + "░" * (5 - value_0_5)
@@ -18,14 +36,17 @@ def _mini_bar(label: str, value_0_5: int, help_text: str = ""):
     if help_text:
         st.caption(help_text)
 
+
 def _parse_metrics(row) -> Dict[str, Any]:
     try:
-        return json.loads(row.get("metrics_json") or "{}")
+        return json.loads(_rget(row, "metrics_json", "") or "{}")
     except Exception:
         return {}
 
+
 def _month_key_now() -> str:
     return datetime.utcnow().strftime("%Y-%m")
+
 
 def _default_prompt_for_month() -> str:
     prompts = [
@@ -36,6 +57,7 @@ def _default_prompt_for_month() -> str:
     ]
     m = int(datetime.utcnow().strftime("%m"))
     return prompts[(m - 1) % len(prompts)]
+
 
 def _metrics_from_checkin(pattern_text: str, cost_text: str, repair_choice: str, agency_choice: str) -> Dict[str, int]:
     clarity = 2
@@ -68,11 +90,12 @@ def _metrics_from_checkin(pattern_text: str, cost_text: str, repair_choice: str,
 
     return {"clarity": clarity, "cost": cost, "agency": agency}
 
+
 def render_growth_dashboard(relationship_id: str, mode: str, respondent: str):
     st.header("SeeUs Growth")
     st.caption("Patterns over time, at a glance. Calm visibility — not a scorecard.")
 
-    cols = st.columns([1,1,1])
+    cols = st.columns([1, 1, 1])
     with cols[0]:
         st.button("Download latest brief", disabled=True)
     with cols[1]:
@@ -102,20 +125,27 @@ def render_growth_dashboard(relationship_id: str, mode: str, respondent: str):
         st.write("No check-ins yet.")
     else:
         for r in rows:
-            month_key = r.get("month_key") or ""
-            created_at = r.get("created_at") or ""
+            month_key = _rget(r, "month_key", "") or ""
+            created_at = _rget(r, "created_at", "") or ""
             with st.container(border=True):
-                st.markdown(f"**{month_key}**  ·  <span style='color:#666'>{created_at}</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"**{month_key}**  ·  <span style='color:#666'>{created_at}</span>",
+                    unsafe_allow_html=True
+                )
 
                 bullets = []
-                if r.get("repair_choice"):
-                    bullets.append(f"Repair: {r.get('repair_choice')}")
-                if (r.get("shift_text") or "").strip():
-                    bullets.append("Shift: " + (r.get("shift_text") or "").strip()[:120])
+                repair_choice = _rget(r, "repair_choice", "")
+                if repair_choice:
+                    bullets.append(f"Repair: {repair_choice}")
+
+                shift_text = (_rget(r, "shift_text", "") or "").strip()
+                if shift_text:
+                    bullets.append("Shift: " + shift_text[:120])
+
                 for b in bullets[:3]:
                     st.markdown(f"- {b}")
 
-                quote = (r.get("pattern_text") or "").strip()
+                quote = (_rget(r, "pattern_text", "") or "").strip()
                 if quote:
                     st.markdown(f"> {quote[:200]}")
 
@@ -194,7 +224,7 @@ def render_growth_dashboard(relationship_id: str, mode: str, respondent: str):
     if refl:
         with st.expander("Previous reflections"):
             for rr in refl:
-                st.markdown(f"**{rr.get('month_key','')}** · {rr.get('created_at','')}")
-                st.caption(rr.get("prompt_text",""))
-                st.write(rr.get("response_text",""))
+                st.markdown(f"**{_rget(rr, 'month_key', '')}** · {_rget(rr, 'created_at', '')}")
+                st.caption(_rget(rr, "prompt_text", "") or "")
+                st.write(_rget(rr, "response_text", "") or "")
                 st.divider()
