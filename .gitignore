@@ -3,4 +3,4 @@ __pycache__/
 .DS_Store
 .env
 .env.*
-.streamlit/secrets.toml
+.streamlit/secrets.tomlseeus_mvp/env.
