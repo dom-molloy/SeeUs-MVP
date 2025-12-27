@@ -4,3 +4,4 @@ __pycache__/
 .env
 .env.*
 .streamlit/secrets.tomlseeus_mvp/env.
+seeus_mvp/env.
