@@ -1,5 +1,10 @@
-from dotenv import load_dotenv
-load_dotenv()
+# Optional: load .env locally. Safe on Streamlit Cloud even if python-dotenv isn't installed.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 import json
 import uuid
 import streamlit as st
@@ -12,7 +17,8 @@ from db import (
     init_db, upsert_user, create_relationship, list_relationships, get_relationship,
     create_session, get_open_session, end_session, save_response,
     get_answers_for_session, get_last_answers, get_answer_history,
-    create_invite, get_invite, mark_invite_used
+    create_invite, get_invite, mark_invite_used,
+    archive_relationship, restore_relationship,   # ✅ add these in db.py
 )
 from questions import QUESTIONS, PRIMARY_IDS, QUESTION_BY_ID
 from scoring import score_solo, score_duo, overall_score
@@ -94,12 +100,18 @@ def _extract_first_0_10(text):
 
 
 def _safe_qp_value(v):
-    # st.query_params may return a string or list-like depending on Streamlit version/usage
     if v is None:
         return None
     if isinstance(v, (list, tuple)):
         return v[0] if v else None
     return v
+
+
+def _is_archived_row(r) -> bool:
+    try:
+        return int(r["is_archived"] or 0) == 1
+    except Exception:
+        return False
 
 
 # ---- Handle invite token in URL (?t=...) ----
@@ -111,7 +123,10 @@ forced_respondent = invite["respondent"] if invite else None
 
 with st.sidebar:
     st.header("SeeUs")
-    page = st.radio("Go to", ["Assess", "Report", "Growth"], index=0)
+    page = st.radio("Go to", ["Assess", "Report", "Growth", "Help"], index=0, key="page")
+
+    # ✅ Toggle to show archived relationships in the dropdown
+    show_archived = st.toggle("Show archived relationships", value=False, key="show_archived")
 
     st.divider()
     st.subheader("Profile")
@@ -123,11 +138,58 @@ with st.sidebar:
         upsert_user(st.session_state["user_id"], st.session_state["display_name"])
         st.success("Saved.")
 
-st.title("SeeUs — Relationship Mirror (MVP)")
+st.title("SeeUs — Relationship Mirror")
+st.caption("**_Created by Dom Molloy and Feliza Irvin_**")
+
+# ✅ HELP must be reachable even when no relationship exists
+if page == "Help":
+    st.title("SeeUs — Help & Getting Started")
+    st.markdown("""
+    ## Welcome to SeeUs
+    SeeUs helps individuals and pairs reflect on patterns, alignment, and growth in relationships.
+    This is not a test. There are no right answers.
+
+    ---
+    ## Getting Started
+    **1) Set your profile** (sidebar) and click **Save profile**  
+    **2) Create or select a relationship**  
+    **3) Choose Solo or Duo and start answering**
+
+    ---
+    ## Modes
+    **Solo**: personal reflection (current or past relationship)  
+    **Duo**: two people answer separately and SeeUs compares perspectives
+
+    ---
+    ## Inviting Someone (Duo)
+    Open **Invite link (Duo mode)** → generate a link → share it directly.
+
+    ---
+    ## Answering Questions
+    - One question at a time
+    - You can skip any question
+    - Answer honestly, not ideally
+
+    ---
+    ## Reports, Deep Research, Growth
+    **Report** summarizes strengths/frictions and dimension insights.  
+    **Deep Research** (optional) generates a Relational Dynamics Brief (requires API key).  
+    **Growth** adds monthly check-ins to track trends over time.
+
+    ---
+    ## Privacy
+    Answers are stored per relationship and per respondent. Nothing is shared automatically.
+    """)
+    st.stop()
+
 
 # Relationship selection (locked if invite token present)
-rels = list_relationships() or []
-rel_labels = [f'{r["label"]}  •  {r["relationship_id"][:8]}' for r in rels]
+include_archived = bool(st.session_state.get("show_archived", False))
+rels = list_relationships(include_archived=include_archived) or []
+rel_labels = [
+    f'{r["label"]}  •  {r["relationship_id"][:8]}' + ("  (archived)" if _is_archived_row(r) else "")
+    for r in rels
+]
 
 if forced_rid:
     rid = forced_rid
@@ -152,6 +214,7 @@ else:
             st.success(f"Created: {new_rid[:8]}")
             st.rerun()
         st.stop()
+
     rid = rels[rel_labels.index(selected)]["relationship_id"]
 
 # persist selected relationship for other pages
@@ -159,6 +222,24 @@ st.session_state["relationship_id"] = rid
 
 relationship = get_relationship(rid)
 st.caption(f"Relationship ID: {rid[:8]}  •  Stored in seeus.db")
+
+# ✅ If selected relationship is archived, allow restore right away
+archived_selected = _is_archived_row(relationship) if relationship else False
+if archived_selected:
+    st.warning("This relationship is archived.")
+    if st.button("Restore relationship"):
+        restore_relationship(rid)
+        st.success("Restored.")
+        st.rerun()
+
+# ✅ Relationship settings: Archive button (soft delete)
+with st.expander("Relationship settings"):
+    st.caption("Archiving hides this relationship from the list (unless 'Show archived relationships' is on). Data is preserved.")
+    confirm_archive = st.checkbox("I understand this will archive the relationship.", key="confirm_archive")
+    if st.button("Archive relationship", disabled=not confirm_archive):
+        archive_relationship(rid)
+        st.success("Archived.")
+        st.rerun()
 
 # Invite link generator (only when not using invite link)
 if not forced_rid:
@@ -194,13 +275,12 @@ if page == "Report":
                 st.write(f"**{DIMENSION_LABELS.get(dim, dim)}:** {s:.1f}  (conf {conf:.2f})")
                 st.caption(notes)
 
-        # --- Deep Research Mode (optional) ---
         st.subheader("Deep Research Mode")
         st.caption("Generates a Relational Dynamics Brief grounded in your answers. Requires OPENAI_API_KEY.")
         dr_model = st.text_input("Deep Research model", value="gpt-4o-mini")
         if st.button("Generate Deep Research Brief"):
             try:
-                bmap = {}  # SOLO: no B answers
+                bmap = {}
                 key_quotes = build_key_quotes(amap, bmap, mode="solo")
                 contradictions = detect_contradictions(amap, bmap, mode="solo")
 
@@ -421,7 +501,6 @@ if page == "Report":
     render_memory(rid)
     st.stop()
 
-
 elif page == "Growth":
     st.header("Growth")
     rid = st.session_state.get("relationship_id")
@@ -440,8 +519,8 @@ elif page == "Growth":
     render_growth_dashboard(rid, mode=sess_mode, respondent=resp)
     st.stop()
 
-
 # -------------------- ASSESS --------------------
+# default fallthrough to Assess
 st.header("Assess")
 
 st.subheader("Truth temperature")
@@ -452,7 +531,6 @@ tone_profile = st.selectbox(
 )
 st.session_state["tone_profile"] = tone_profile
 
-# If invite link, force duo + respondent
 if forced_rid:
     mode = "duo"
 else:
@@ -511,7 +589,6 @@ else:
 rows_me = [r for r in rows_all if r["respondent"] == respondent]
 answered = set([r["question_id"] for r in rows_me])
 
-# --- branch queue in session_state (per respondent) ---
 bq_key = f"branch_queue_{sid}_{respondent}"
 used_dim_key = f"branch_used_dims_{sid}_{respondent}"
 if bq_key not in st.session_state:
@@ -612,8 +689,6 @@ if next_qid is None:
     st.stop()
 
 q = QUESTION_BY_ID[next_qid]
-
-# FIX: define q_idx correctly
 q_idx = next((i for i, qq in enumerate(QUESTIONS) if qq["id"] == next_qid), 0)
 
 st.markdown(f"### Q{q_idx + 1} of {len(QUESTIONS)}")
@@ -634,7 +709,6 @@ with c1:
         )
         _maybe_queue_branches(answer, q)
 
-        # if we just answered a branched question, pop it
         if st.session_state[bq_key] and st.session_state[bq_key][0] == q["id"]:
             st.session_state[bq_key].pop(0)
 
