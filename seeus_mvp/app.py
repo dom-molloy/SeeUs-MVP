@@ -5,12 +5,16 @@ try:
 except Exception:
     pass
 
+import os
 import json
 import uuid
-import streamlit as st
-from growth_ui import render_growth_dashboard
 from datetime import datetime
 from urllib.parse import urlencode
+
+import streamlit as st
+
+from growth_ui import render_growth_dashboard
+from question_store import load_question_bank
 
 from db import (
     save_report, get_latest_report,
@@ -18,9 +22,9 @@ from db import (
     create_session, get_open_session, end_session, save_response,
     get_answers_for_session, get_last_answers, get_answer_history,
     create_invite, get_invite, mark_invite_used,
-    archive_relationship, restore_relationship,   # ✅ add these in db.py
+    archive_relationship, restore_relationship,
 )
-from questions import QUESTIONS, PRIMARY_IDS, QUESTION_BY_ID
+
 from scoring import score_solo, score_duo, overall_score
 from llm_scoring import score_duo_llm, overall_from_llm
 from reporting import DIMENSION_ORDER, DIMENSION_LABELS, build_headlines
@@ -29,21 +33,52 @@ from research_packet import build_key_quotes, detect_contradictions, compute_del
 from render_brief import render_brief
 from pdf_export import brief_to_pdf_bytes
 
+
+# -------------------- CONFIG --------------------
 st.set_page_config(page_title="SeeUs MVP", layout="centered")
 init_db()
 
+# If you set this on Streamlit Cloud (Secrets) or locally (env), the invite link becomes portable.
+BASE_APP_URL = (os.getenv("BASE_APP_URL") or "").strip() or "https://seeus-mvp-nfbw9pe3pclpgw4kchx9gh.streamlit.app"
+
+# Optional: provide a default questions URL so local dev works even without secrets.toml/env.
+DEFAULT_QUESTIONS_URL = "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
+
+
+# -------------------- HELPERS --------------------
+def _get_setting(key: str, default: str = "") -> str:
+    # st.secrets throws if no secrets.toml exists; guard hard.
+    try:
+        return str(st.secrets[key])
+    except Exception:
+        return str(os.getenv(key, default) or default)
+
+def _get_query_param(name: str):
+    # New Streamlit API
+    try:
+        v = st.query_params.get(name)
+        if isinstance(v, (list, tuple)):
+            return v[0] if v else None
+        return v
+    except Exception:
+        pass
+
+    # Old Streamlit API fallback
+    try:
+        qp = st.experimental_get_query_params()
+        v = qp.get(name, [None])
+        return v[0] if isinstance(v, list) else v
+    except Exception:
+        return None
 
 def answered_ids(rows):
     return set([r["question_id"] for r in rows])
-
 
 def latest_map(rows_desc):
     m = {}
     for r in reversed(rows_desc):  # newest overwrites
         m[r["question_id"]] = r["answer_text"]
     return m
-
-
 def render_memory(rid):
     st.subheader("What I remember (latest answers)")
     c1, c2 = st.columns(2)
@@ -71,8 +106,6 @@ def render_change_tracking(rid):
         st.markdown(f"**#{i+1} • {row['created_at']}**")
         st.write(row["answer_text"] or "(blank)")
         st.divider()
-
-
 def _tone_key(tone: str) -> str:
     t = (tone or "Gentle").lower()
     if "sugar" in t or "sharp" in t:
@@ -83,12 +116,10 @@ def _tone_key(tone: str) -> str:
         return "gentle"
     return "default"
 
-
 def _prompt_for(q, tone: str) -> str:
     key = _tone_key(tone)
     pr = q.get("prompt") or {}
     return pr.get(key) or pr.get("default") or q.get("text") or ""
-
 
 def _extract_first_0_10(text):
     import re
@@ -98,15 +129,6 @@ def _extract_first_0_10(text):
             return n
     return None
 
-
-def _safe_qp_value(v):
-    if v is None:
-        return None
-    if isinstance(v, (list, tuple)):
-        return v[0] if v else None
-    return v
-
-
 def _is_archived_row(r) -> bool:
     try:
         return int(r["is_archived"] or 0) == 1
@@ -114,18 +136,33 @@ def _is_archived_row(r) -> bool:
         return False
 
 
-# ---- Handle invite token in URL (?t=...) ----
-qp = st.query_params
-token = _safe_qp_value(qp.get("t"))
+# -------------------- INVITE LOCKING (ONE PLACE ONLY) --------------------
+token = _get_query_param("t")
 invite = get_invite(token) if token else None
+
+if token and not invite:
+    st.error("This invite link is invalid or expired (token not found).")
+    st.stop()
+
 forced_rid = invite["relationship_id"] if invite else None
 forced_respondent = invite["respondent"] if invite else None
 
+
+# -------------------- QUESTION BANK --------------------
+REMOTE_QUESTIONS_URL = (_get_setting("QUESTIONS_URL", "") or os.getenv("QUESTIONS_URL", "")).strip()
+if not REMOTE_QUESTIONS_URL:
+    REMOTE_QUESTIONS_URL = DEFAULT_QUESTIONS_URL
+
+QUESTIONS = load_question_bank(REMOTE_QUESTIONS_URL)
+QUESTION_BY_ID = {q["id"]: q for q in QUESTIONS}
+PRIMARY_IDS = [q["id"] for q in QUESTIONS if q.get("is_primary")]
+
+
+# -------------------- UI: SIDEBAR --------------------
 with st.sidebar:
     st.header("SeeUs")
     page = st.radio("Go to", ["Assess", "Report", "Growth", "Help"], index=0, key="page")
 
-    # ✅ Toggle to show archived relationships in the dropdown
     show_archived = st.toggle("Show archived relationships", value=False, key="show_archived")
 
     st.divider()
@@ -138,120 +175,140 @@ with st.sidebar:
         upsert_user(st.session_state["user_id"], st.session_state["display_name"])
         st.success("Saved.")
 
+
+# -------------------- HEADER --------------------
 st.title("SeeUs — Relationship Mirror")
 st.caption("**_Created by Dom Molloy and Feliza Irvin_**")
 
-# ✅ HELP must be reachable even when no relationship exists
+
+# -------------------- HELP (reachable anytime) --------------------
 if page == "Help":
-    st.title("SeeUs — Help & Getting Started")
+    st.header("Help & Getting Started")
     st.markdown("""
-    ## Welcome to SeeUs
-    SeeUs helps individuals and pairs reflect on patterns, alignment, and growth in relationships.
-    This is not a test. There are no right answers.
+**What is SeeUs?**  
+SeeUs helps individuals and pairs reflect on patterns, alignment, and growth in relationships.
 
-    ---
-    ## Getting Started
-    **1) Set your profile** (sidebar) and click **Save profile**  
-    **2) Create or select a relationship**  
-    **3) Choose Solo or Duo and start answering**
+**Quick Start**
+1) Set your profile (left sidebar) → **Save profile**  
+2) Create/select a relationship  
+3) Go to **Assess** and answer questions
 
-    ---
-    ## Modes
-    **Solo**: personal reflection (current or past relationship)  
-    **Duo**: two people answer separately and SeeUs compares perspectives
+**Duo mode**
+- Create invite link → send to the other person
+- Their link locks the relationship + respondent automatically
 
-    ---
-    ## Inviting Someone (Duo)
-    Open **Invite link (Duo mode)** → generate a link → share it directly.
+**Report**
+- Summaries and optional Deep Research (requires OPENAI_API_KEY)
 
-    ---
-    ## Answering Questions
-    - One question at a time
-    - You can skip any question
-    - Answer honestly, not ideally
-
-    ---
-    ## Reports, Deep Research, Growth
-    **Report** summarizes strengths/frictions and dimension insights.  
-    **Deep Research** (optional) generates a Relational Dynamics Brief (requires API key).  
-    **Growth** adds monthly check-ins to track trends over time.
-
-    ---
-    ## Privacy
-    Answers are stored per relationship and per respondent. Nothing is shared automatically.
-    """)
+**Growth**
+- Monthly check-ins to track trends over time
+""")
     st.stop()
 
 
-# Relationship selection (locked if invite token present)
+# -------------------- RELATIONSHIP SELECT / LOCK --------------------
 include_archived = bool(st.session_state.get("show_archived", False))
-rels = list_relationships(include_archived=include_archived) or []
-rel_labels = [
-    f'{r["label"]}  •  {r["relationship_id"][:8]}' + ("  (archived)" if _is_archived_row(r) else "")
-    for r in rels
-]
 
+# If invite link: lock relationship immediately + show it clearly.
 if forced_rid:
     rid = forced_rid
-    st.info("Invite link detected — relationship is locked for this session.")
+    relationship = get_relationship(rid)
+    label = (relationship["label"] if relationship else "(unknown relationship)")
+    st.info(f"Invite link detected — **locked** to: **{label}**  •  {rid[:8]}")
+    st.session_state["relationship_id"] = rid
+
 else:
+    rels = list_relationships(include_archived=include_archived) or []
+    rel_labels = [
+        f'{r["label"]}  •  {r["relationship_id"][:8]}' + ("  (archived)" if _is_archived_row(r) else "")
+        for r in rels
+    ]
+
     selected = st.selectbox("Relationship", ["(new)"] + rel_labels, key="rel_select")
+
     if selected == "(new)":
         st.subheader("Create a relationship")
         label = st.text_input("Label (e.g., 'Me + Tricia')")
         other_id = st.text_input("Other person ID (optional)")
+
         if st.button("Create"):
             if not st.session_state.get("user_id"):
                 st.error("Set your profile in the sidebar first.")
                 st.stop()
+
             new_rid = str(uuid.uuid4())
             create_relationship(
                 new_rid,
                 st.session_state["user_id"],
                 other_id.strip() or None,
-                label.strip() or "Untitled"
+                label.strip() or "Untitled",
             )
             st.success(f"Created: {new_rid[:8]}")
             st.rerun()
+
         st.stop()
 
     rid = rels[rel_labels.index(selected)]["relationship_id"]
+    st.session_state["relationship_id"] = rid
+    relationship = get_relationship(rid)
 
-# persist selected relationship for other pages
-st.session_state["relationship_id"] = rid
-
-relationship = get_relationship(rid)
 st.caption(f"Relationship ID: {rid[:8]}  •  Stored in seeus.db")
-
-# ✅ If selected relationship is archived, allow restore right away
-archived_selected = _is_archived_row(relationship) if relationship else False
-if archived_selected:
-    st.warning("This relationship is archived.")
-    if st.button("Restore relationship"):
-        restore_relationship(rid)
-        st.success("Restored.")
-        st.rerun()
-
-# ✅ Relationship settings: Archive button (soft delete)
-with st.expander("Relationship settings"):
-    st.caption("Archiving hides this relationship from the list (unless 'Show archived relationships' is on). Data is preserved.")
-    confirm_archive = st.checkbox("I understand this will archive the relationship.", key="confirm_archive")
-    if st.button("Archive relationship", disabled=not confirm_archive):
-        archive_relationship(rid)
-        st.success("Archived.")
-        st.rerun()
-
 # Invite link generator (only when not using invite link)
 if not forced_rid:
     with st.expander("Invite link (Duo mode)"):
         st.write("Generate a tokenized link for Person B (or A).")
         which = st.selectbox("Invite respondent", ["B", "A"], index=0)
+
         if st.button("Create invite link"):
             t = str(uuid.uuid4()).replace("-", "")
             create_invite(t, rid, which)
+
+            BASE_APP_URL = "https://seeus-mvp-nfbw9pe3pclpgw4kchx9gh.streamlit.app"
             qs = urlencode({"t": t})
-            st.code(f"?{qs}")
-            st.caption("Append this to your app URL (e.g., https://yourapp.com/?t=TOKEN).")
+            invite_url = f"{BASE_APP_URL}/?{qs}"
+
+            # ✅ Copyable code block (adds a copy button automatically)
+            st.code(invite_url)
+            st.caption("⬆ Hover and click the copy icon to copy the invite link.")
+            # Optional visual affordance
+            st.caption("Click the copy icon to copy the invite link and send it to the other person.")
+
+# -------------------- RELATIONSHIP SETTINGS --------------------
+# Disable archive/restore controls when using invite link (prevents partner from hiding it)
+if not forced_rid:
+    archived_selected = _is_archived_row(relationship) if relationship else False
+    if archived_selected:
+        st.warning("This relationship is archived.")
+        if st.button("Restore relationship"):
+            restore_relationship(rid)
+            st.success("Restored.")
+            st.rerun()
+
+    with st.expander("Relationship settings"):
+        st.caption("Archiving hides this relationship from the list. Data is preserved.")
+        confirm_archive = st.checkbox("I understand this will archive the relationship.", key="confirm_archive")
+        if st.button("Archive relationship", disabled=not confirm_archive):
+            archive_relationship(rid)
+            st.success("Archived.")
+            st.rerun()
+
+
+# -------------------- INVITE LINK GENERATOR --------------------
+if not forced_rid:
+    with st.expander("Invite link (Duo mode)"):
+        st.write("Generate a tokenized link for Person B (or A).")
+        which = st.selectbox(
+    "Invite respondent",
+    ["B", "A"],
+    index=0,
+    key="invite_respondent_select"
+)
+        if st.button("Create invite link", key="create_invite_button"):
+            t = str(uuid.uuid4()).replace("-", "")
+            create_invite(t, rid, which)
+            qs = urlencode({"t": t})
+            st.code(f"{BASE_APP_URL}/?{qs}")
+            st.caption("Copy the full link and send it to the other person.")
 
 
 # -------------------- PAGE ROUTING --------------------
@@ -278,24 +335,19 @@ if page == "Report":
         st.subheader("Deep Research Mode")
         st.caption("Generates a Relational Dynamics Brief grounded in your answers. Requires OPENAI_API_KEY.")
         dr_model = st.text_input("Deep Research model", value="gpt-4o-mini")
+
         if st.button("Generate Deep Research Brief"):
             try:
                 bmap = {}
                 key_quotes = build_key_quotes(amap, bmap, mode="solo")
                 contradictions = detect_contradictions(amap, bmap, mode="solo")
-
                 qids = [q["id"] for q in QUESTIONS]
-                deltas = []
-                deltas += compute_deltas_over_time(get_answer_history, rid, "solo", qids, limit=3)
+                deltas = compute_deltas_over_time(get_answer_history, rid, "solo", qids, limit=3)
 
-                dimension_scores = []
-                for dim_key, tup in scores.items():
-                    dimension_scores.append({
-                        "dimension": dim_key,
-                        "score": float(tup[0]),
-                        "confidence": "Medium",
-                        "rationale": tup[2]
-                    })
+                dimension_scores = [
+                    {"dimension": dim_key, "score": float(tup[0]), "confidence": "Medium", "rationale": tup[2]}
+                    for dim_key, tup in scores.items()
+                ]
 
                 brief = run_deep_research(
                     mode="solo",
@@ -305,6 +357,7 @@ if page == "Report":
                     deltas_over_time=deltas,
                     model=dr_model.strip() or "gpt-4o-mini",
                 )
+
                 save_report(str(uuid.uuid4()), rid, "deep", json.dumps(brief, ensure_ascii=False))
                 st.success("Deep Research Brief saved.")
                 render_brief(brief)
@@ -326,29 +379,6 @@ if page == "Report":
             except Exception as e:
                 st.error(f"Deep Research failed: {e}")
                 st.info("Tip: set OPENAI_API_KEY in your environment and restart Streamlit.")
-
-        latest_deep = get_latest_report(rid, report_type="deep")
-        if latest_deep:
-            with st.expander("Latest saved Deep Research Brief"):
-                try:
-                    saved = json.loads(latest_deep["content_json"])
-                    render_brief(saved)
-                    pdf_bytes = brief_to_pdf_bytes(
-                        saved,
-                        header={
-                            "relationship_label": relationship["label"] if relationship else rid[:8],
-                            "generated_at": latest_deep["created_at"],
-                            "model": "saved",
-                        },
-                    )
-                    st.download_button(
-                        "Download saved PDF",
-                        data=pdf_bytes,
-                        file_name="seeus_relational_dynamics_brief_saved.pdf",
-                        mime="application/pdf",
-                    )
-                except Exception:
-                    st.write(latest_deep["content_json"])
 
         st.divider()
         render_change_tracking(rid)
@@ -362,7 +392,7 @@ if page == "Report":
         bmap = latest_map(rows_b)
 
         use_llm = st.toggle("Use LLM scoring (OpenAI)", value=False, help="Requires OPENAI_API_KEY in your environment.")
-        model = st.text_input("Model", value="gpt-4o-mini", help="Change if you want a different OpenAI model.")
+        model = st.text_input("Model", value="gpt-4o-mini")
 
         if use_llm:
             try:
@@ -374,8 +404,6 @@ if page == "Report":
                 for d in dim_scores:
                     st.write(f"**{DIMENSION_LABELS.get(d['dimension'], d['dimension'])}:** {float(d.get('score', 0)):.1f}  •  {d.get('confidence', '')}")
                     st.caption(d.get("rationale", ""))
-                    if d.get("prompts_next"):
-                        st.caption("Follow-ups: " + " | ".join(d["prompts_next"]))
 
                 st.divider()
                 render_change_tracking(rid)
@@ -389,16 +417,6 @@ if page == "Report":
         scores = score_duo(amap, bmap)
         st.metric("Overall compatibility (0–10)", f"{overall_score(scores):.1f}")
 
-        if st.button("Save this report (heuristic)"):
-            payload = {
-                "type": "heuristic",
-                "overall": float(overall_score(scores)),
-                "dimension_scores": {k: {"score": float(v[0]), "confidence": float(v[1]), "notes": v[2]} for k, v in scores.items()},
-                "created_at": datetime.utcnow().isoformat(timespec="seconds"),
-            }
-            save_report(str(uuid.uuid4()), rid, "heuristic", json.dumps(payload, ensure_ascii=False))
-            st.success("Saved.")
-
         heads = build_headlines(scores)
         st.subheader("Headlines")
         st.write("**Top strengths**")
@@ -408,105 +426,20 @@ if page == "Report":
         for dim, s in heads["bottom"]:
             st.write(f"- {DIMENSION_LABELS.get(dim, dim)}: {s:.1f}")
 
-        st.subheader("Dimension scores")
-        for dim in DIMENSION_ORDER:
-            if dim in scores:
-                s, conf, notes = scores[dim]
-                st.write(f"**{DIMENSION_LABELS.get(dim, dim)}:** {s:.1f}  (conf {conf:.2f})")
-                st.caption(notes)
-
-        st.subheader("Deep Research Mode")
-        st.caption("Generates a Relational Dynamics Brief grounded in your answers. Requires OPENAI_API_KEY.")
-        dr_model = st.text_input("Deep Research model", value="gpt-4o-mini")
-        if st.button("Generate Deep Research Brief"):
-            try:
-                key_quotes = build_key_quotes(amap, bmap, mode="duo")
-                contradictions = detect_contradictions(amap, bmap, mode="duo")
-
-                qids = [q["id"] for q in QUESTIONS]
-                deltas = []
-                deltas += compute_deltas_over_time(get_answer_history, rid, "A", qids, limit=3)
-                deltas += compute_deltas_over_time(get_answer_history, rid, "B", qids, limit=3)
-
-                dimension_scores = []
-                for dim_key, tup in scores.items():
-                    dimension_scores.append({
-                        "dimension": dim_key,
-                        "score": float(tup[0]),
-                        "confidence": "Medium",
-                        "rationale": tup[2]
-                    })
-
-                brief = run_deep_research(
-                    mode="duo",
-                    dimension_scores=dimension_scores,
-                    key_quotes=key_quotes,
-                    contradictions=contradictions,
-                    deltas_over_time=deltas,
-                    model=dr_model.strip() or "gpt-4o-mini",
-                )
-                save_report(str(uuid.uuid4()), rid, "deep", json.dumps(brief, ensure_ascii=False))
-                st.success("Deep Research Brief saved.")
-                render_brief(brief)
-
-                pdf_bytes = brief_to_pdf_bytes(
-                    brief,
-                    header={
-                        "relationship_label": relationship["label"] if relationship else rid[:8],
-                        "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
-                        "model": dr_model.strip() or "gpt-4o-mini",
-                    },
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf_bytes,
-                    file_name="seeus_relational_dynamics_brief.pdf",
-                    mime="application/pdf",
-                )
-            except Exception as e:
-                st.error(f"Deep Research failed: {e}")
-                st.info("Tip: set OPENAI_API_KEY in your environment and restart Streamlit.")
-
-        latest_deep = get_latest_report(rid, report_type="deep")
-        if latest_deep:
-            with st.expander("Latest saved Deep Research Brief"):
-                try:
-                    saved = json.loads(latest_deep["content_json"])
-                    render_brief(saved)
-                    pdf_bytes = brief_to_pdf_bytes(
-                        saved,
-                        header={
-                            "relationship_label": relationship["label"] if relationship else rid[:8],
-                            "generated_at": latest_deep["created_at"],
-                            "model": "saved",
-                        },
-                    )
-                    st.download_button(
-                        "Download saved PDF",
-                        data=pdf_bytes,
-                        file_name="seeus_relational_dynamics_brief_saved.pdf",
-                        mime="application/pdf",
-                    )
-                except Exception:
-                    st.write(latest_deep["content_json"])
-
         st.divider()
         render_change_tracking(rid)
         st.divider()
         render_memory(rid)
         st.stop()
 
-    st.info("Not enough data yet for a Duo report. Complete answers for A and B (or run Solo).")
+    st.info("Not enough data yet for a report. Complete Solo or both A and B.")
     render_change_tracking(rid)
     render_memory(rid)
     st.stop()
 
-elif page == "Growth":
+
+if page == "Growth":
     st.header("Growth")
-    rid = st.session_state.get("relationship_id")
-    if not rid:
-        st.info("Start or select a relationship in **Assess** first.")
-        st.stop()
 
     open_sess = get_open_session(rid)
     sess_mode = open_sess["mode"] if open_sess else st.session_state.get("mode", "solo")
@@ -519,18 +452,19 @@ elif page == "Growth":
     render_growth_dashboard(rid, mode=sess_mode, respondent=resp)
     st.stop()
 
-# -------------------- ASSESS --------------------
-# default fallthrough to Assess
+
+# -------------------- ASSESS (default) --------------------
 st.header("Assess")
 
 st.subheader("Truth temperature")
 tone_profile = st.selectbox(
     "How direct do you want this to be?",
     ["Gentle & supportive", "Clear & direct", "No sugarcoating"],
-    index=0
+    index=0,
 )
 st.session_state["tone_profile"] = tone_profile
 
+# If invite link: force duo
 if forced_rid:
     mode = "duo"
 else:
@@ -556,6 +490,7 @@ with colA:
             st.rerun()
 
 with colB:
+    # Don’t let invite-user end the session from their side
     if open_sess is not None and not forced_rid:
         if st.button("End open session"):
             end_session(open_sess["session_id"])
@@ -572,6 +507,7 @@ if not sid:
 sess_mode = st.session_state.get("mode", mode)
 rows_all = get_answers_for_session(sid) or []
 
+# Respondent selection
 if sess_mode == "solo":
     respondent = "solo"
 else:
@@ -589,13 +525,13 @@ else:
 rows_me = [r for r in rows_all if r["respondent"] == respondent]
 answered = set([r["question_id"] for r in rows_me])
 
+# Branch queue (per respondent)
 bq_key = f"branch_queue_{sid}_{respondent}"
 used_dim_key = f"branch_used_dims_{sid}_{respondent}"
 if bq_key not in st.session_state:
     st.session_state[bq_key] = []
 if used_dim_key not in st.session_state:
     st.session_state[used_dim_key] = set()
-
 
 def _queue_branch(question_id: str):
     q0 = QUESTION_BY_ID.get(question_id)
@@ -608,7 +544,6 @@ def _queue_branch(question_id: str):
         st.session_state[bq_key].append(question_id)
         st.session_state[used_dim_key].add(dim)
 
-
 def _maybe_queue_branches(latest_answer_text: str, q_obj: dict):
     branch_id = q_obj.get("branch")
     if not branch_id:
@@ -617,7 +552,6 @@ def _maybe_queue_branches(latest_answer_text: str, q_obj: dict):
     if len(txt) < 30:
         _queue_branch(branch_id)
 
-
 def _next_question_id():
     if st.session_state[bq_key]:
         return st.session_state[bq_key][0]
@@ -625,7 +559,6 @@ def _next_question_id():
         if qid not in answered:
             return qid
     return None
-
 
 primary_done = sum([1 for qid in PRIMARY_IDS if qid in answered])
 st.divider()
