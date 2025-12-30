@@ -1,7 +1,13 @@
 # bugs.py
 import uuid
 from typing import Optional, List, Any, Dict
-from db import conn, now_iso
+
+# ✅ Works both locally (flat files) and on Streamlit Cloud (package paths)
+try:
+    from seeus_mvp.db import conn, now_iso
+except Exception:
+    from db import conn, now_iso
+
 
 BUG_STATUSES = ["New", "In Progress", "Fixed", "Verified", "Closed", "Rejected"]
 SEVERITIES = ["Low", "Medium", "High", "Critical"]
@@ -15,8 +21,10 @@ VALID_TRANSITIONS = {
     "Rejected": [],
 }
 
+
 def is_valid_transition(current: str, nxt: str) -> bool:
     return nxt == current or nxt in VALID_TRANSITIONS.get(current, [])
+
 
 def create_bug(title: str, description: str, reporter: str, severity: str = "Medium") -> str:
     bug_id = str(uuid.uuid4())
@@ -45,6 +53,7 @@ def create_bug(title: str, description: str, reporter: str, severity: str = "Med
             ),
         )
     return bug_id
+
 
 def list_bugs(
     status: Optional[str] = None,
@@ -83,9 +92,11 @@ def list_bugs(
     with conn() as c:
         return c.execute(sql, tuple(params)).fetchall()
 
+
 def get_bug(bug_id: str):
     with conn() as c:
         return c.execute("SELECT * FROM bugs WHERE id=?", (bug_id,)).fetchone()
+
 
 def update_bug(
     bug_id: str,
@@ -127,15 +138,18 @@ def update_bug(
     with conn() as c:
         c.execute(f"UPDATE bugs SET {', '.join(fields)} WHERE id=?", tuple(params))
 
+
 def bug_metrics() -> Dict[str, Any]:
     with conn() as c:
-        by_status = {r["status"]: r["n"] for r in c.execute(
-            "SELECT status, COUNT(*) AS n FROM bugs GROUP BY status"
-        ).fetchall()}
+        by_status = {
+            r["status"]: r["n"]
+            for r in c.execute("SELECT status, COUNT(*) AS n FROM bugs GROUP BY status").fetchall()
+        }
 
-        by_severity = {r["severity"]: r["n"] for r in c.execute(
-            "SELECT severity, COUNT(*) AS n FROM bugs GROUP BY severity"
-        ).fetchall()}
+        by_severity = {
+            r["severity"]: r["n"]
+            for r in c.execute("SELECT severity, COUNT(*) AS n FROM bugs GROUP BY severity").fetchall()
+        }
 
         open_critical = c.execute(
             "SELECT COUNT(*) AS n FROM bugs WHERE severity='Critical' AND status NOT IN ('Closed','Rejected')"
