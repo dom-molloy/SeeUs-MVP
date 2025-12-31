@@ -159,9 +159,14 @@ def render_bug_tracker(current_user: str):
 # -------------------- INVITE LOCKING --------------------
 token = _get_query_param("t")
 invite = get_invite(token) if token else None
+
+# 🚨 IMPORTANT: invalid or expired invite
+if token and not invite:
+    st.error("This invite link is invalid or expired (token not found).")
+    st.stop()
+
 forced_rid = invite["relationship_id"] if invite else None
 forced_respondent = invite["respondent"] if invite else None
-
 
 # -------------------- QUESTIONS --------------------
 REMOTE_QUESTIONS_URL = _get_setting("QUESTIONS_URL") or DEFAULT_QUESTIONS_URL
