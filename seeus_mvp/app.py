@@ -504,13 +504,15 @@ if page == "Report":
 st.header("Assess")
 
 st.subheader("Truth temperature")
-tone_profile = st.selectbox(
+
+st.selectbox(
     "How direct do you want this to be?",
     ["Gentle & supportive", "Clear & direct", "No sugarcoating"],
     index=0,
     key="tone_profile",
 )
-st.session_state["tone_profile"] = tone_profile
+
+tone_profile = st.session_state["tone_profile"]
 
 # If invite link, force duo
 if forced_rid:
