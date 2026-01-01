@@ -179,7 +179,7 @@ def render_bug_tracker(current_user: str):
                 if not title.strip() or not desc.strip():
                     st.error("Title and description required.")
                 else:
-                    create_bug(title, desc, current_user, sev)
+                    create_bug(title, desciption, current_user, sev)
                     st.success("Submitted.")
                     st.rerun()
 
