@@ -143,6 +143,14 @@ def init_db():
         if "tone_profile" not in cols_sessions:
             c.execute("ALTER TABLE sessions ADD COLUMN tone_profile TEXT")
 
+                # --- bugs module table ---
+        try:
+            from bugs import init_bugs_table
+            init_bugs_table()
+        except Exception:
+            # allow db.py to be imported even if bugs.py missing temporarily
+            pass
+            
         # ✅ Add relationships.is_archived (soft delete) if missing
         cols_rels = [r["name"] for r in c.execute("PRAGMA table_info(relationships)").fetchall()]
         if "is_archived" not in cols_rels:
@@ -437,3 +445,4 @@ def list_growth_reflections(relationship_id, respondent=None, limit=50):
             """,
             (relationship_id, limit),
         ).fetchall()
+
