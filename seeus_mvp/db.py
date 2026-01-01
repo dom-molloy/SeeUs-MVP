@@ -446,3 +446,9 @@ def list_growth_reflections(relationship_id, respondent=None, limit=50):
             (relationship_id, limit),
         ).fetchall()
 
+ # --- bugs module table ---
+        try:
+            from bugs import init_bugs_table
+            init_bugs_table()
+        except Exception:
+            pass
