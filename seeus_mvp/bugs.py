@@ -1,158 +1,147 @@
-# bugs.py
+# seeus_mvp/bugs.py
+import json
 import uuid
-from typing import Optional, List, Any, Dict
+from typing import Any, Dict, List, Optional
 
-# ✅ Works both locally (flat files) and on Streamlit Cloud (package paths)
-try:
-    from seeus_mvp.db import conn, now_iso
-except Exception:
-    from db import conn, now_iso
+from db import conn, now_iso
 
 
-BUG_STATUSES = ["New", "In Progress", "Fixed", "Verified", "Closed", "Rejected"]
+BUG_STATUSES = ["New", "In Progress", "Completed", "Rejected"]
 SEVERITIES = ["Low", "Medium", "High", "Critical"]
 
-VALID_TRANSITIONS = {
-    "New": ["In Progress", "Rejected"],
-    "In Progress": ["Fixed", "Rejected"],
-    "Fixed": ["Verified"],
-    "Verified": ["Closed"],
-    "Closed": [],
-    "Rejected": [],
-}
+
+def init_bugs_table():
+    with conn() as c:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bugs (
+                bug_id TEXT PRIMARY KEY,
+                created_at TEXT,
+                created_by TEXT,
+                title TEXT,
+                description TEXT,
+                severity TEXT,
+                status TEXT,
+                assignee TEXT,
+                resolution_notes TEXT,
+                tags_json TEXT
+            );
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_sev ON bugs(severity)")
 
 
-def is_valid_transition(current: str, nxt: str) -> bool:
-    return nxt == current or nxt in VALID_TRANSITIONS.get(current, [])
-
-
-def create_bug(title: str, description: str, reporter: str, severity: str = "Medium") -> str:
+def create_bug(
+    title: str,
+    description: str,
+    created_by: str,
+    severity: str = "Medium",
+    tags: Optional[List[str]] = None,
+) -> str:
     bug_id = str(uuid.uuid4())
-    if severity not in SEVERITIES:
-        severity = "Medium"
-
     with conn() as c:
         c.execute(
             """
             INSERT INTO bugs (
-                id, title, description, reporter, severity, status,
-                assignee, resolution_notes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bug_id, created_at, created_by, title, description,
+                severity, status, assignee, resolution_notes, tags_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bug_id,
-                (title or "").strip()[:200],
-                (description or "").strip(),
-                (reporter or "unknown").strip()[:200],
+                now_iso(),
+                created_by,
+                title.strip(),
+                description.strip(),
                 severity,
                 "New",
                 None,
                 None,
-                now_iso(),
-                now_iso(),
+                json.dumps(tags or []),
             ),
         )
     return bug_id
 
 
-def list_bugs(
-    status: Optional[str] = None,
-    severity: Optional[str] = None,
-    assignee: Optional[str] = None,
-    search: Optional[str] = None,
-    limit: int = 200,
-):
-    where = []
-    params: List[Any] = []
+def list_bugs(status: Optional[str] = None, severity: Optional[str] = None) -> List[Dict[str, Any]]:
+    q = "SELECT * FROM bugs"
+    clauses = []
+    params = []
 
     if status and status != "All":
-        where.append("status=?")
+        clauses.append("status=?")
         params.append(status)
-
     if severity and severity != "All":
-        where.append("severity=?")
+        clauses.append("severity=?")
         params.append(severity)
 
-    if assignee and assignee != "All":
-        if assignee == "(Unassigned)":
-            where.append("(assignee IS NULL OR assignee='')")
-        else:
-            where.append("assignee=?")
-            params.append(assignee)
-
-    if search:
-        s = f"%{search}%"
-        where.append("(title LIKE ? OR description LIKE ? OR reporter LIKE ? OR assignee LIKE ?)")
-        params.extend([s, s, s, s])
-
-    where_sql = "WHERE " + " AND ".join(where) if where else ""
-    sql = f"SELECT * FROM bugs {where_sql} ORDER BY updated_at DESC LIMIT ?"
-    params.append(limit)
+    if clauses:
+        q += " WHERE " + " AND ".join(clauses)
+    q += " ORDER BY created_at DESC"
 
     with conn() as c:
-        return c.execute(sql, tuple(params)).fetchall()
+        return [dict(r) for r in c.execute(q, params).fetchall()]
 
 
-def get_bug(bug_id: str):
+def get_bug(bug_id: str) -> Optional[Dict[str, Any]]:
     with conn() as c:
-        return c.execute("SELECT * FROM bugs WHERE id=?", (bug_id,)).fetchone()
+        row = c.execute("SELECT * FROM bugs WHERE bug_id=?", (bug_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def update_bug(
     bug_id: str,
-    *,
     status: Optional[str] = None,
     assignee: Optional[str] = None,
     resolution_notes: Optional[str] = None,
+    severity: Optional[str] = None,
 ):
-    bug = get_bug(bug_id)
-    if not bug:
-        raise ValueError("Bug not found")
-
-    if status:
-        if status not in BUG_STATUSES:
-            raise ValueError("Invalid status")
-        if not is_valid_transition(bug["status"], status):
-            raise ValueError(f"Invalid transition: {bug['status']} → {status}")
-
-    fields = []
-    params: List[Any] = []
+    sets = []
+    params = []
 
     if status is not None:
-        fields.append("status=?")
+        sets.append("status=?")
         params.append(status)
-
     if assignee is not None:
-        fields.append("assignee=?")
+        sets.append("assignee=?")
         params.append(assignee.strip() or None)
-
     if resolution_notes is not None:
-        fields.append("resolution_notes=?")
+        sets.append("resolution_notes=?")
         params.append(resolution_notes.strip() or None)
+    if severity is not None:
+        sets.append("severity=?")
+        params.append(severity)
 
-    fields.append("updated_at=?")
-    params.append(now_iso())
+    if not sets:
+        return
 
     params.append(bug_id)
-
     with conn() as c:
-        c.execute(f"UPDATE bugs SET {', '.join(fields)} WHERE id=?", tuple(params))
+        c.execute(f"UPDATE bugs SET {', '.join(sets)} WHERE bug_id=?", params)
 
 
 def bug_metrics() -> Dict[str, Any]:
     with conn() as c:
-        by_status = {
-            r["status"]: r["n"]
-            for r in c.execute("SELECT status, COUNT(*) AS n FROM bugs GROUP BY status").fetchall()
-        }
+        rows = c.execute(
+            """
+            SELECT status, COUNT(*) AS n
+            FROM bugs
+            GROUP BY status
+            """
+        ).fetchall()
+        by_status = {r["status"]: int(r["n"]) for r in rows}
 
-        by_severity = {
-            r["severity"]: r["n"]
-            for r in c.execute("SELECT severity, COUNT(*) AS n FROM bugs GROUP BY severity").fetchall()
-        }
+        crit_open = c.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM bugs
+            WHERE severity='Critical' AND status IN ('New','In Progress')
+            """
+        ).fetchone()
 
-        open_critical = c.execute(
-            "SELECT COUNT(*) AS n FROM bugs WHERE severity='Critical' AND status NOT IN ('Closed','Rejected')"
-        ).fetchone()["n"]
-
-    return {"by_status": by_status, "by_severity": by_severity, "open_critical": open_critical}
+    return {
+        "by_status": by_status,
+        "open_critical": int(crit_open["n"]) if crit_open else 0,
+    }
