@@ -3,7 +3,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
-from db import conn, now_iso
+from seeus_mvp.db import conn, now_iso
 
 
 BUG_STATUSES = ["New", "In Progress", "Completed", "Rejected"]
