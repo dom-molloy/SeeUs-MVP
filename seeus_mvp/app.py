@@ -299,23 +299,6 @@ if not forced_rid:
             st.rerun()
 
 
-# -------------------- INVITE LINK GENERATOR --------------------
-if not forced_rid:
-    with st.expander("Invite link (Duo mode)"):
-        st.write("Generate a tokenized link for Person B (or A).")
-        which = st.selectbox(
-    "Invite respondent",
-    ["B", "A"],
-    index=0,
-    key="invite_respondent_select"
-)
-        if st.button("Create invite link", key="create_invite_button"):
-            t = str(uuid.uuid4()).replace("-", "")
-            create_invite(t, rid, which)
-            qs = urlencode({"t": t})
-            st.code(f"{BASE_APP_URL}/?{qs}")
-            st.caption("Copy the full link and send it to the other person.")
-
 
 # -------------------- PAGE ROUTING --------------------
 if page == "Report":
