@@ -1,13 +1,7 @@
 # bugs.py
 import uuid
 from typing import Optional, List, Any, Dict
-
-# ✅ Works both locally (flat files) and on Streamlit Cloud (package paths)
-try:
-    from seeus_mvp.db import conn, now_iso
-except Exception:
-    from db import conn, now_iso
-
+from db import conn, now_iso
 
 BUG_STATUSES = ["New", "In Progress", "Fixed", "Verified", "Closed", "Rejected"]
 SEVERITIES = ["Low", "Medium", "High", "Critical"]
