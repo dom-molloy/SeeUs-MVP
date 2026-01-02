@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
 import os
 import json
 import uuid
@@ -11,6 +12,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 
 import streamlit as st
+import streamlit.components.v1 as components  # ✅ moved to top
 
 # --- Package-safe imports (works whether modules are in /seeus_mvp or repo root) ---
 try:
@@ -77,13 +79,6 @@ except ModuleNotFoundError:
         BUG_STATUSES, SEVERITIES, bug_metrics,
     )
 
-
-
-
-
-
-
-
 from seeus_mvp.scoring import score_solo, score_duo, overall_score
 from seeus_mvp.llm_scoring import score_duo_llm, overall_from_llm
 from seeus_mvp.reporting import DIMENSION_ORDER, DIMENSION_LABELS, build_headlines
@@ -117,7 +112,6 @@ DEFAULT_QUESTIONS_URL = (
 
 
 def _get_setting(key: str, default: str = "") -> str:
-    # st.secrets throws if no secrets file exists locally
     try:
         return str(st.secrets[key])
     except Exception:
@@ -125,7 +119,6 @@ def _get_setting(key: str, default: str = "") -> str:
 
 
 def _get_query_param(name: str):
-    # Streamlit >= 1.30
     try:
         v = st.query_params.get(name)
         if isinstance(v, (list, tuple)):
@@ -134,7 +127,6 @@ def _get_query_param(name: str):
     except Exception:
         pass
 
-    # Older Streamlit
     try:
         qp = st.experimental_get_query_params()
         v = qp.get(name, [None])
@@ -143,7 +135,6 @@ def _get_query_param(name: str):
         return None
 
 
-# ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
 @st.cache_resource
 def _bootstrap():
     init_db()
@@ -159,7 +150,6 @@ except Exception as e:
     st.stop()
 
 
-# -------------------- QUESTIONS (cache + friendly failure) --------------------
 REMOTE_QUESTIONS_URL = _get_setting("QUESTIONS_URL") or DEFAULT_QUESTIONS_URL
 
 
@@ -183,7 +173,7 @@ PRIMARY_IDS = [q["id"] for q in QUESTIONS if q.get("is_primary")]
 
 def latest_map(rows_desc):
     m = {}
-    for r in reversed(rows_desc):  # newest overwrites
+    for r in reversed(rows_desc):
         m[r["question_id"]] = r["answer_text"]
     return m
 
@@ -219,7 +209,6 @@ def render_change_tracking(rid, QUESTIONS_):
 
 def _extract_first_0_10(text):
     import re
-
     nums = [float(x) for x in re.findall(r"(?<!\d)(\d+(?:\.\d+)?)", text or "")]
     for n in nums:
         if 0 <= n <= 10:
@@ -363,11 +352,9 @@ with st.sidebar:
         st.success("Saved.")
 
 
-# -------------------- HEADER --------------------
 st.title("SeeUs — Relationship Mirror")
 st.caption("**_Created by Dom Molloy and Feliza Irvin_**")
 
-# -------------------- ROUTING: Bug Tracker / Help --------------------
 if page == "Bug Tracker":
     who = st.session_state.get("display_name") or st.session_state.get("user_id") or "unknown"
     render_bug_tracker(who)
@@ -392,7 +379,6 @@ if page == "Help":
     st.stop()
 
 
-# -------------------- RELATIONSHIP SELECTION --------------------
 include_archived = bool(st.session_state.get("show_archived", False))
 rels = list_relationships(include_archived=include_archived) or []
 rel_labels = [
@@ -431,7 +417,6 @@ relationship = get_relationship(rid)
 st.caption(f"Relationship ID: {rid[:8]}  •  Stored in seeus.db")
 
 
-# -------------------- RELATIONSHIP SETTINGS --------------------
 if not forced_rid:
     archived_selected = _is_archived_row(relationship) if relationship else False
     if archived_selected:
@@ -450,18 +435,45 @@ if not forced_rid:
             st.rerun()
 
 
-# -------------------- INVITE LINK GENERATOR --------------------
+# -------------------- INVITE LINK GENERATOR (✅ FIXED COPY BUTTON) --------------------
 def _clipboard_button(label: str, text: str, key: str):
-    # Works across Streamlit versions; uses JS clipboard API.
-    import streamlit.components.v1 as components
+    safe_text = json.dumps(text)
+    btn_id = f"copy_btn_{key}"
 
     html = f"""
-    <button style="padding:0.4rem 0.7rem;border-radius:8px;border:1px solid #ddd;cursor:pointer;"
-      onclick="navigator.clipboard.writeText({json.dumps(text)});">
-      {label}
-    </button>
+    <div>
+      <button id="{btn_id}" style="
+          padding:0.45rem 0.8rem;
+          border-radius:8px;
+          border:1px solid #ddd;
+          background:white;
+          cursor:pointer;
+          font-weight:600;">
+        {label}
+      </button>
+    </div>
+
+    <script>
+      (function() {{
+        const text = {safe_text};
+        const btn = document.getElementById("{btn_id}");
+        const original = btn.innerText;
+
+        btn.addEventListener("click", async () => {{
+          try {{
+            await navigator.clipboard.writeText(text);
+            btn.innerText = "✅ Copied!";
+            setTimeout(() => btn.innerText = original, 1500);
+          }} catch (e) {{
+            btn.innerText = "❌ Copy blocked";
+            setTimeout(() => btn.innerText = original, 2000);
+            console.log(e);
+          }}
+        }});
+      }})();
+    </script>
     """
-    components.html(html, height=45)
+    components.html(html, height=60)
 
 
 if not forced_rid:
@@ -477,7 +489,7 @@ if not forced_rid:
         link = st.session_state.get("latest_invite_link", "")
         if link:
             st.text_input("Invite link", value=link, disabled=True, key="invite_link_box")
-            _clipboard_button("Copy invite link", link, key="copy_invite_link")
+            _clipboard_button("Copy invite link", link, key=f"invite_{link[-10:]}")
             st.caption("Copy and send the full link to the other person.")
 
 
@@ -629,6 +641,10 @@ if page == "Report":
     render_change_tracking(rid, QUESTIONS)
     render_memory(rid)
     st.stop()
+
+# -------------------- ASSESS --------------------
+# (unchanged below...)
+
 
 
 # -------------------- ASSESS --------------------
