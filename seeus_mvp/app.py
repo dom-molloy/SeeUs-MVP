@@ -3,6 +3,7 @@
 # Optional: load .env locally. Safe on Streamlit Cloud even if python-dotenv isn't installed.
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
@@ -16,52 +17,70 @@ from urllib.parse import urlencode
 import streamlit as st
 
 from seeus_mvp.question_store import load_question_bank
-
 from seeus_mvp.db import (
-    save_report, get_latest_report,
-    init_db, upsert_user, create_relationship, list_relationships, get_relationship,
-    create_session, get_open_session, end_session, save_response,
-    get_answers_for_session, get_last_answers, get_answer_history,
-    create_invite, get_invite, mark_invite_used,
-    archive_relationship, restore_relationship,
+    save_report,
+    get_latest_report,
+    init_db,
+    upsert_user,
+    create_relationship,
+    list_relationships,
+    get_relationship,
+    create_session,
+    get_open_session,
+    end_session,
+    save_response,
+    get_answers_for_session,
+    get_last_answers,
+    get_answer_history,
+    create_invite,
+    get_invite,
+    mark_invite_used,
+    archive_relationship,
+    restore_relationship,
 )
 
 # ✅ package-safe import so Streamlit Cloud doesn't load a different bugs.py
 from seeus_mvp.bugs import (
     init_bugs_table,
-    create_bug, list_bugs, get_bug, update_bug,
-    BUG_STATUSES, SEVERITIES, bug_metrics
+    create_bug,
+    list_bugs,
+    get_bug,
+    update_bug,
+    BUG_STATUSES,
+    SEVERITIES,
+    bug_metrics,
 )
 
 from seeus_mvp.scoring import score_solo, score_duo, overall_score
 from seeus_mvp.llm_scoring import score_duo_llm, overall_from_llm
 from seeus_mvp.reporting import DIMENSION_ORDER, DIMENSION_LABELS, build_headlines
-from seeus_mvp.deep_research import run_deep_research
-from seeus_mvp.research_packet import build_key_quotes, detect_contradictions, compute_deltas_over_time
-from seeus_mvp.render_brief import render_brief
-from seeus_mvp.pdf_export import brief_to_pdf_bytes
 from seeus_mvp.growth_ui import render_growth_dashboard
+
+# --- OPTIONAL FEATURES (don’t let missing modules hang/kill the whole app) ---
+HAS_DEEP_RESEARCH = True
+try:
+    from seeus_mvp.deep_research import run_deep_research
+    from seeus_mvp.research_packet import (
+        build_key_quotes,
+        detect_contradictions,
+        compute_deltas_over_time,
+    )
+    from seeus_mvp.render_brief import render_brief
+    from seeus_mvp.pdf_export import brief_to_pdf_bytes
+except Exception:
+    HAS_DEEP_RESEARCH = False
 
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="SeeUs MVP", layout="centered")
 
-# ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
-@st.cache_resource
-def _bootstrap():
-    init_db()
-    init_bugs_table()
-    return True
-
-try:
-    _bootstrap()
-except Exception as e:
-    st.error("Startup failed during initialization.")
-    st.exception(e)
-    st.stop()
-
-BASE_APP_URL = (os.getenv("BASE_APP_URL") or "").strip() or "https://seeus-mvp-nfbw9pe3pclpgw4kchx9gh.streamlit.app"
-DEFAULT_QUESTIONS_URL = "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
+BASE_APP_URL = (
+    (os.getenv("BASE_APP_URL") or "").strip()
+    or "https://seeus-mvp-nfbw9pe3pclpgw4kchx9gh.streamlit.app"
+)
+DEFAULT_QUESTIONS_URL = (
+    "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
+)
 
 
 def _get_setting(key: str, default: str = "") -> str:
@@ -73,6 +92,7 @@ def _get_setting(key: str, default: str = "") -> str:
 
 
 def _get_query_param(name: str):
+    # Streamlit >= 1.30
     try:
         v = st.query_params.get(name)
         if isinstance(v, (list, tuple)):
@@ -80,12 +100,52 @@ def _get_query_param(name: str):
         return v
     except Exception:
         pass
+
+    # Older Streamlit
     try:
         qp = st.experimental_get_query_params()
         v = qp.get(name, [None])
         return v[0] if isinstance(v, list) else v
     except Exception:
         return None
+
+
+# ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
+@st.cache_resource
+def _bootstrap():
+    init_db()
+    init_bugs_table()
+    return True
+
+
+try:
+    _bootstrap()
+except Exception as e:
+    st.error("Startup failed during initialization.")
+    st.exception(e)
+    st.stop()
+
+
+# -------------------- QUESTIONS (cache + friendly failure) --------------------
+REMOTE_QUESTIONS_URL = _get_setting("QUESTIONS_URL") or DEFAULT_QUESTIONS_URL
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_questions(url: str):
+    return load_question_bank(url)
+
+
+try:
+    with st.spinner("Loading question bank..."):
+        QUESTIONS = _load_questions(REMOTE_QUESTIONS_URL)
+except Exception as e:
+    st.error("Failed to load the question bank.")
+    st.caption("If this is Streamlit Cloud, confirm the URL is reachable and returns valid JSON.")
+    st.exception(e)
+    st.stop()
+
+QUESTION_BY_ID = {q["id"]: q for q in QUESTIONS}
+PRIMARY_IDS = [q["id"] for q in QUESTIONS if q.get("is_primary")]
 
 
 def latest_map(rows_desc):
@@ -110,10 +170,10 @@ def render_memory(rid):
             st.write(f"- {r['question_id']}: {str(r['answer_text'] or '')[:90]}")
 
 
-def render_change_tracking(rid, QUESTIONS):
+def render_change_tracking(rid, QUESTIONS_):
     st.subheader("Change tracking (last 3 answers per question)")
     respondent = st.selectbox("Respondent", ["A", "B", "solo"], index=0, key="ct_resp")
-    qid = st.selectbox("Question", [q["id"] for q in QUESTIONS], key="ct_qid")
+    qid = st.selectbox("Question", [q["id"] for q in QUESTIONS_], key="ct_qid")
     hist = get_answer_history(rid, respondent, qid, limit=3) or []
     if not hist:
         st.info("No history yet for that question.")
@@ -126,6 +186,7 @@ def render_change_tracking(rid, QUESTIONS):
 
 def _extract_first_0_10(text):
     import re
+
     nums = [float(x) for x in re.findall(r"(?<!\d)(\d+(?:\.\d+)?)", text or "")]
     for n in nums:
         if 0 <= n <= 10:
@@ -152,7 +213,7 @@ def _prompt_for(q, tone: str) -> str:
 
 def _is_archived_row(r) -> bool:
     try:
-        return int(r["is_archived"] or 0) == 1
+        return int(r.get("is_archived") or 0) == 1
     except Exception:
         return False
 
@@ -168,22 +229,18 @@ forced_rid = invite["relationship_id"] if invite else None
 forced_respondent = invite["respondent"] if invite else None
 
 
-# -------------------- QUESTIONS --------------------
-REMOTE_QUESTIONS_URL = _get_setting("QUESTIONS_URL") or DEFAULT_QUESTIONS_URL
-QUESTIONS = load_question_bank(REMOTE_QUESTIONS_URL)
-QUESTION_BY_ID = {q["id"]: q for q in QUESTIONS}
-PRIMARY_IDS = [q["id"] for q in QUESTIONS if q.get("is_primary")]
-
-
 # -------------------- BUG TRACKER UI --------------------
 def render_bug_tracker(current_user: str):
     st.header("🐞 Bug Tracker")
 
-    m = bug_metrics()
+    m = bug_metrics() or {"open_critical": 0, "by_status": {}}
     c1, c2, c3 = st.columns(3)
-    c1.metric("Open Critical", m["open_critical"])
-    c2.metric("Total", sum(m["by_status"].values()) if m["by_status"] else 0)
-    c3.metric("Closed", m["by_status"].get("Completed", 0) + m["by_status"].get("Rejected", 0))
+    c1.metric("Open Critical", m.get("open_critical", 0))
+    c2.metric("Total", sum((m.get("by_status") or {}).values()) if m.get("by_status") else 0)
+    c3.metric(
+        "Closed",
+        (m.get("by_status") or {}).get("Completed", 0) + (m.get("by_status") or {}).get("Rejected", 0),
+    )
 
     st.divider()
 
@@ -208,7 +265,7 @@ def render_bug_tracker(current_user: str):
     with f2:
         sev = st.selectbox("Filter by severity", ["All"] + SEVERITIES, key="bug_filter_sev")
 
-    bugs = list_bugs(status=status, severity=sev)
+    bugs = list_bugs(status=status, severity=sev) or []
     if not bugs:
         st.info("No items match your filters.")
         return
@@ -221,11 +278,21 @@ def render_bug_tracker(current_user: str):
         return
 
     st.write("### Details")
-    st.write(bug["description"])
+    st.write(bug.get("description") or "")
 
     with st.form("bug_update_form"):
-        new_status = st.selectbox("Status", BUG_STATUSES, index=BUG_STATUSES.index(bug["status"]), key="bug_new_status")
-        new_sev = st.selectbox("Severity", SEVERITIES, index=SEVERITIES.index(bug["severity"]), key="bug_new_sev")
+        new_status = st.selectbox(
+            "Status",
+            BUG_STATUSES,
+            index=max(0, BUG_STATUSES.index(bug["status"])) if bug.get("status") in BUG_STATUSES else 0,
+            key="bug_new_status",
+        )
+        new_sev = st.selectbox(
+            "Severity",
+            SEVERITIES,
+            index=max(0, SEVERITIES.index(bug["severity"])) if bug.get("severity") in SEVERITIES else 0,
+            key="bug_new_sev",
+        )
         assignee = st.text_input("Assignee", bug.get("assignee") or "", key="bug_assignee")
         notes = st.text_area("Resolution Notes", bug.get("resolution_notes") or "", key="bug_notes")
         if st.form_submit_button("Save changes"):
@@ -354,6 +421,7 @@ if not forced_rid:
 def _clipboard_button(label: str, text: str, key: str):
     # Works across Streamlit versions; uses JS clipboard API.
     import streamlit.components.v1 as components
+
     html = f"""
     <button style="padding:0.4rem 0.7rem;border-radius:8px;border:1px solid #ddd;cursor:pointer;"
       onclick="navigator.clipboard.writeText({json.dumps(text)});">
@@ -413,57 +481,61 @@ if page == "Report":
                 st.caption(notes)
 
         st.subheader("Deep Research Mode")
-        st.caption("Generates a Relational Dynamics Brief grounded in your answers. Requires OPENAI_API_KEY.")
-        dr_model = st.text_input("Deep Research model", value="gpt-4o-mini", key="dr_model_solo")
+        if not HAS_DEEP_RESEARCH:
+            st.warning("Deep Research modules aren’t available in this deployment.")
+        else:
+            st.caption("Generates a Relational Dynamics Brief grounded in your answers. Requires OPENAI_API_KEY.")
+            dr_model = st.text_input("Deep Research model", value="gpt-4o-mini", key="dr_model_solo")
 
-        if st.button("Generate Deep Research Brief", key="dr_btn_solo"):
-            try:
-                bmap = {}
-                key_quotes = build_key_quotes(amap, bmap, mode="solo")
-                contradictions = detect_contradictions(amap, bmap, mode="solo")
+            if st.button("Generate Deep Research Brief", key="dr_btn_solo"):
+                try:
+                    bmap = {}
+                    key_quotes = build_key_quotes(amap, bmap, mode="solo")
+                    contradictions = detect_contradictions(amap, bmap, mode="solo")
 
-                qids = [q["id"] for q in QUESTIONS]
-                deltas = compute_deltas_over_time(get_answer_history, rid, "solo", qids, limit=3)
+                    qids = [q["id"] for q in QUESTIONS]
+                    deltas = compute_deltas_over_time(get_answer_history, rid, "solo", qids, limit=3)
 
-                # ✅ FIX: avoid fragile long-line list literals that can get mangled
-                dimension_scores = []
-                for dim_key, tup in scores.items():
-                    dimension_scores.append({
-                        "dimension": dim_key,
-                        "score": float(tup[0]),
-                        "confidence": "Medium",
-                        "rationale": str(tup[2] or ""),
-                    })
+                    dimension_scores = []
+                    for dim_key, tup in scores.items():
+                        dimension_scores.append(
+                            {
+                                "dimension": dim_key,
+                                "score": float(tup[0]),
+                                "confidence": "Medium",
+                                "rationale": str(tup[2] or ""),
+                            }
+                        )
 
-                brief = run_deep_research(
-                    mode="solo",
-                    dimension_scores=dimension_scores,
-                    key_quotes=key_quotes,
-                    contradictions=contradictions,
-                    deltas_over_time=deltas,
-                    model=dr_model.strip() or "gpt-4o-mini",
-                )
-                save_report(str(uuid.uuid4()), rid, "deep", json.dumps(brief, ensure_ascii=False))
-                st.success("Deep Research Brief saved.")
-                render_brief(brief)
+                    brief = run_deep_research(
+                        mode="solo",
+                        dimension_scores=dimension_scores,
+                        key_quotes=key_quotes,
+                        contradictions=contradictions,
+                        deltas_over_time=deltas,
+                        model=(dr_model.strip() or "gpt-4o-mini"),
+                    )
+                    save_report(str(uuid.uuid4()), rid, "deep", json.dumps(brief, ensure_ascii=False))
+                    st.success("Deep Research Brief saved.")
+                    render_brief(brief)
 
-                pdf_bytes = brief_to_pdf_bytes(
-                    brief,
-                    header={
-                        "relationship_label": relationship["label"] if relationship else rid[:8],
-                        "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
-                        "model": dr_model.strip() or "gpt-4o-mini",
-                    },
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf_bytes,
-                    file_name="seeus_relational_dynamics_brief.pdf",
-                    mime="application/pdf",
-                )
-            except Exception as e:
-                st.error(f"Deep Research failed: {e}")
-                st.info("Tip: set OPENAI_API_KEY in your environment and restart Streamlit.")
+                    pdf_bytes = brief_to_pdf_bytes(
+                        brief,
+                        header={
+                            "relationship_label": relationship["label"] if relationship else rid[:8],
+                            "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+                            "model": (dr_model.strip() or "gpt-4o-mini"),
+                        },
+                    )
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf_bytes,
+                        file_name="seeus_relational_dynamics_brief.pdf",
+                        mime="application/pdf",
+                    )
+                except Exception as e:
+                    st.error(f"Deep Research failed: {e}")
+                    st.info("Tip: set OPENAI_API_KEY in your environment and restart Streamlit.")
 
         st.divider()
         render_change_tracking(rid, QUESTIONS)
@@ -536,7 +608,6 @@ tone_profile = st.selectbox(
     index=0,
     key="tone_profile",
 )
-# ✅ DO NOT set st.session_state["tone_profile"] here; Streamlit owns widget state.
 
 # If invite link, force duo
 if forced_rid:
@@ -600,10 +671,13 @@ answered = set([r["question_id"] for r in rows_me])
 # Branch queue (per respondent)
 bq_key = f"branch_queue_{sid}_{respondent}"
 used_dim_key = f"branch_used_dims_{sid}_{respondent}"
+
 if bq_key not in st.session_state:
     st.session_state[bq_key] = []
+
+# ✅ Avoid storing a Python set in session_state (can be flaky across reruns/deploys)
 if used_dim_key not in st.session_state:
-    st.session_state[used_dim_key] = set()
+    st.session_state[used_dim_key] = []  # list of dimension keys already used
 
 
 def _queue_branch(question_id: str):
@@ -611,11 +685,13 @@ def _queue_branch(question_id: str):
     if not q0:
         return
     dim = q0.get("dimension")
-    if dim in st.session_state[used_dim_key]:
+    used_dims = set(st.session_state.get(used_dim_key, []) or [])
+    if dim in used_dims:
         return
     if question_id not in st.session_state[bq_key] and question_id not in answered:
         st.session_state[bq_key].append(question_id)
-        st.session_state[used_dim_key].add(dim)
+        used_dims.add(dim)
+        st.session_state[used_dim_key] = list(used_dims)
 
 
 def _maybe_queue_branches(latest_answer_text: str, q_obj: dict):
@@ -651,9 +727,21 @@ if (not st.session_state[mm_key]) and primary_done >= 5:
     close = next((r["answer_text"] for r in rows_me if r["question_id"] == "closeness_numeric"), "")
     cn = _extract_first_0_10(close)
 
-    strength = "You’re naming what matters to you with some clarity." if len((vals or "").strip()) >= 40 else "You’re starting to identify what matters most."
-    tension = f"Your closeness number is around {cn:g}/10, which can create negotiation around space and contact." if cn is not None else "Closeness/space needs may become a negotiation point."
-    cost_line = "You’ve historically carried some discomfort to stay connected." if len((cost or "").strip()) >= 20 else "There may be an unspoken cost you’re willing to pay for connection."
+    strength = (
+        "You’re naming what matters to you with some clarity."
+        if len((vals or "").strip()) >= 40
+        else "You’re starting to identify what matters most."
+    )
+    tension = (
+        f"Your closeness number is around {cn:g}/10, which can create negotiation around space and contact."
+        if cn is not None
+        else "Closeness/space needs may become a negotiation point."
+    )
+    cost_line = (
+        "You’ve historically carried some discomfort to stay connected."
+        if len((cost or "").strip()) >= 20
+        else "There may be an unspoken cost you’re willing to pay for connection."
+    )
 
     st.markdown(f"**Strength:** {strength}")
     st.markdown(f"**Tension:** {tension}")
@@ -684,8 +772,12 @@ next_qid = _next_question_id()
 if next_qid is None:
     st.success(f"{respondent} is done for this session.")
     if sess_mode == "duo":
-        done_a = all([qid in set([r["question_id"] for r in rows_all if r["respondent"] == "A"]) for qid in PRIMARY_IDS])
-        done_b = all([qid in set([r["question_id"] for r in rows_all if r["respondent"] == "B"]) for qid in PRIMARY_IDS])
+        done_a = all(
+            [qid in set([r["question_id"] for r in rows_all if r["respondent"] == "A"]) for qid in PRIMARY_IDS]
+        )
+        done_b = all(
+            [qid in set([r["question_id"] for r in rows_all if r["respondent"] == "B"]) for qid in PRIMARY_IDS]
+        )
         if done_a and done_b:
             st.success("Both A and B are done. Go to **Report**.")
         else:
