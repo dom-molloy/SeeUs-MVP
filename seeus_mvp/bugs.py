@@ -5,31 +5,97 @@ from typing import Any, Dict, List, Optional
 
 from seeus_mvp.db import conn, now_iso
 
-
 BUG_STATUSES = ["New", "In Progress", "Completed", "Rejected"]
 SEVERITIES = ["Low", "Medium", "High", "Critical"]
 
+# Canonical schema for bugs table
+_BUGS_COLUMNS = [
+    ("bug_id", "TEXT PRIMARY KEY"),
+    ("created_at", "TEXT"),
+    ("created_by", "TEXT"),
+    ("title", "TEXT"),
+    ("description", "TEXT"),
+    ("severity", "TEXT"),
+    ("status", "TEXT"),
+    ("assignee", "TEXT"),
+    ("resolution_notes", "TEXT"),
+    ("tags_json", "TEXT"),
+]
+
+
+def _table_exists(c, name: str) -> bool:
+    row = c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _get_columns(c, table: str) -> List[str]:
+    rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+    # sqlite3.Row supports dict-like access if row_factory is set; otherwise use index
+    cols = []
+    for r in rows:
+        try:
+            cols.append(r["name"])
+        except Exception:
+            cols.append(r[1])
+    return cols
+
 
 def init_bugs_table():
+    """
+    Ensures the bugs table exists with the expected schema.
+
+    Migration behavior (keeps data when possible):
+      - If 'bugs' doesn't exist: create it
+      - If 'bugs' exists but schema differs: create bugs_new, copy overlapping columns,
+        drop old bugs, rename bugs_new -> bugs
+    """
     with conn() as c:
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bugs (
-                bug_id TEXT PRIMARY KEY,
-                created_at TEXT,
-                created_by TEXT,
-                title TEXT,
-                description TEXT,
-                severity TEXT,
-                status TEXT,
-                assignee TEXT,
-                resolution_notes TEXT,
-                tags_json TEXT
-            );
-            """
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_sev ON bugs(severity)")
+        # Create if missing
+        if not _table_exists(c, "bugs"):
+            c.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS bugs (
+                    {", ".join([f"{n} {t}" for n, t in _BUGS_COLUMNS])}
+                );
+                """
+            )
+        else:
+            existing_cols = set(_get_columns(c, "bugs"))
+            expected_cols = [n for n, _ in _BUGS_COLUMNS]
+            expected_set = set(expected_cols)
+
+            # If mismatch, migrate
+            if existing_cols != expected_set:
+                c.execute("DROP TABLE IF EXISTS bugs_new;")
+                c.execute(
+                    f"""
+                    CREATE TABLE bugs_new (
+                        {", ".join([f"{n} {t}" for n, t in _BUGS_COLUMNS])}
+                    );
+                    """
+                )
+
+                overlap = [col for col in expected_cols if col in existing_cols]
+                if overlap:
+                    cols_csv = ", ".join(overlap)
+                    c.execute(
+                        f"""
+                        INSERT INTO bugs_new ({cols_csv})
+                        SELECT {cols_csv}
+                        FROM bugs;
+                        """
+                    )
+
+                c.execute("DROP TABLE bugs;")
+                c.execute("ALTER TABLE bugs_new RENAME TO bugs;")
+
+        # Indexes (safe to run repeatedly)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_sev ON bugs(severity);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_created_at ON bugs(created_at);")
 
 
 def create_bug(
@@ -53,8 +119,8 @@ def create_bug(
                 bug_id,
                 now_iso(),
                 created_by,
-                title.strip(),
-                description.strip(),
+                (title or "").strip(),
+                (description or "").strip(),
                 severity,
                 "New",
                 None,
@@ -106,10 +172,10 @@ def update_bug(
         params.append(status)
     if assignee is not None:
         sets.append("assignee=?")
-        params.append(assignee.strip() or None)
+        params.append((assignee or "").strip() or None)
     if resolution_notes is not None:
         sets.append("resolution_notes=?")
-        params.append(resolution_notes.strip() or None)
+        params.append((resolution_notes or "").strip() or None)
     if severity is not None:
         sets.append("severity=?")
         params.append(severity)
@@ -131,7 +197,12 @@ def bug_metrics() -> Dict[str, Any]:
             GROUP BY status
             """
         ).fetchall()
-        by_status = {r["status"]: int(r["n"]) for r in rows}
+        by_status = {}
+        for r in rows:
+            try:
+                by_status[r["status"]] = int(r["n"])
+            except Exception:
+                by_status[r[0]] = int(r[1])
 
         crit_open = c.execute(
             """
@@ -141,7 +212,12 @@ def bug_metrics() -> Dict[str, Any]:
             """
         ).fetchone()
 
+    try:
+        open_critical = int(crit_open["n"]) if crit_open else 0
+    except Exception:
+        open_critical = int(crit_open[0]) if crit_open else 0
+
     return {
         "by_status": by_status,
-        "open_critical": int(crit_open["n"]) if crit_open else 0,
+        "open_critical": open_critical,
     }
