@@ -15,9 +15,9 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from question_store import load_question_bank
+from seeus_mvp.question_store import load_question_bank
 
-from db import (
+from seeus_mvp.db import (
     save_report, get_latest_report,
     init_db, upsert_user, create_relationship, list_relationships, get_relationship,
     create_session, get_open_session, end_session, save_response,
@@ -26,21 +26,21 @@ from db import (
     archive_relationship, restore_relationship,
 )
 
-# ✅ ensure the bugs table exists on startup
-from bugs import (
+# ✅ package-safe import so Streamlit Cloud doesn't load a different bugs.py
+from seeus_mvp.bugs import (
     init_bugs_table,
     create_bug, list_bugs, get_bug, update_bug,
     BUG_STATUSES, SEVERITIES, bug_metrics
 )
 
-from scoring import score_solo, score_duo, overall_score
-from llm_scoring import score_duo_llm, overall_from_llm
-from reporting import DIMENSION_ORDER, DIMENSION_LABELS, build_headlines
-from deep_research import run_deep_research
-from research_packet import build_key_quotes, detect_contradictions, compute_deltas_over_time
-from render_brief import render_brief
-from pdf_export import brief_to_pdf_bytes
-from growth_ui import render_growth_dashboard
+from seeus_mvp.scoring import score_solo, score_duo, overall_score
+from seeus_mvp.llm_scoring import score_duo_llm, overall_from_llm
+from seeus_mvp.reporting import DIMENSION_ORDER, DIMENSION_LABELS, build_headlines
+from seeus_mvp.deep_research import run_deep_research
+from seeus_mvp.research_packet import build_key_quotes, detect_contradictions, compute_deltas_over_time
+from seeus_mvp.render_brief import render_brief
+from seeus_mvp.pdf_export import brief_to_pdf_bytes
+from seeus_mvp.growth_ui import render_growth_dashboard
 
 
 # -------------------- CONFIG --------------------
@@ -362,6 +362,7 @@ def _clipboard_button(label: str, text: str, key: str):
     """
     components.html(html, height=45)
 
+
 if not forced_rid:
     with st.expander("Invite link (Duo mode)"):
         st.write("Generate a tokenized link for Person B (or A).")
@@ -535,7 +536,7 @@ tone_profile = st.selectbox(
     index=0,
     key="tone_profile",
 )
-st.session_state["tone_profile"] = tone_profile
+# ✅ DO NOT set st.session_state["tone_profile"] here; Streamlit owns widget state.
 
 # If invite link, force duo
 if forced_rid:
