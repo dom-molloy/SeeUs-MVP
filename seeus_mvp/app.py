@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import streamlit as st
 import streamlit.components.v1 as components  # ✅ moved to top
 
+
 # --- Package-safe imports (works whether modules are in /seeus_mvp or repo root) ---
 try:
     from seeus_mvp.question_store import load_question_bank
@@ -112,6 +113,7 @@ DEFAULT_QUESTIONS_URL = (
 
 
 def _get_setting(key: str, default: str = "") -> str:
+    # st.secrets throws if no secrets file exists locally
     try:
         return str(st.secrets[key])
     except Exception:
@@ -119,6 +121,7 @@ def _get_setting(key: str, default: str = "") -> str:
 
 
 def _get_query_param(name: str):
+    # Streamlit >= 1.30
     try:
         v = st.query_params.get(name)
         if isinstance(v, (list, tuple)):
@@ -127,6 +130,7 @@ def _get_query_param(name: str):
     except Exception:
         pass
 
+    # Older Streamlit
     try:
         qp = st.experimental_get_query_params()
         v = qp.get(name, [None])
@@ -135,6 +139,7 @@ def _get_query_param(name: str):
         return None
 
 
+# ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
 @st.cache_resource
 def _bootstrap():
     init_db()
@@ -150,6 +155,7 @@ except Exception as e:
     st.stop()
 
 
+# -------------------- QUESTIONS (cache + friendly failure) --------------------
 REMOTE_QUESTIONS_URL = _get_setting("QUESTIONS_URL") or DEFAULT_QUESTIONS_URL
 
 
@@ -173,7 +179,7 @@ PRIMARY_IDS = [q["id"] for q in QUESTIONS if q.get("is_primary")]
 
 def latest_map(rows_desc):
     m = {}
-    for r in reversed(rows_desc):
+    for r in reversed(rows_desc):  # newest overwrites
         m[r["question_id"]] = r["answer_text"]
     return m
 
@@ -209,6 +215,7 @@ def render_change_tracking(rid, QUESTIONS_):
 
 def _extract_first_0_10(text):
     import re
+
     nums = [float(x) for x in re.findall(r"(?<!\d)(\d+(?:\.\d+)?)", text or "")]
     for n in nums:
         if 0 <= n <= 10:
@@ -352,9 +359,11 @@ with st.sidebar:
         st.success("Saved.")
 
 
+# -------------------- HEADER --------------------
 st.title("SeeUs — Relationship Mirror")
 st.caption("**_Created by Dom Molloy and Feliza Irvin_**")
 
+# -------------------- ROUTING: Bug Tracker / Help --------------------
 if page == "Bug Tracker":
     who = st.session_state.get("display_name") or st.session_state.get("user_id") or "unknown"
     render_bug_tracker(who)
@@ -379,6 +388,7 @@ if page == "Help":
     st.stop()
 
 
+# -------------------- RELATIONSHIP SELECTION --------------------
 include_archived = bool(st.session_state.get("show_archived", False))
 rels = list_relationships(include_archived=include_archived) or []
 rel_labels = [
@@ -417,6 +427,7 @@ relationship = get_relationship(rid)
 st.caption(f"Relationship ID: {rid[:8]}  •  Stored in seeus.db")
 
 
+# -------------------- RELATIONSHIP SETTINGS --------------------
 if not forced_rid:
     archived_selected = _is_archived_row(relationship) if relationship else False
     if archived_selected:
@@ -435,9 +446,13 @@ if not forced_rid:
             st.rerun()
 
 
-# -------------------- INVITE LINK GENERATOR (✅ FIXED COPY BUTTON) --------------------
+# -------------------- INVITE LINK GENERATOR --------------------
 def _clipboard_button(label: str, text: str, key: str):
-    safe_text = json.dumps(text)
+    """
+    Copy-to-clipboard button that changes to ✅ Copied! then reverts.
+    Uses unique element IDs to avoid Streamlit rerender collisions.
+    """
+    safe_text = json.dumps(text)  # JS-safe string
     btn_id = f"copy_btn_{key}"
 
     html = f"""
@@ -485,11 +500,14 @@ if not forced_rid:
             create_invite(t, rid, which)
             link = f"{BASE_APP_URL}/?{urlencode({'t': t})}"
             st.session_state["latest_invite_link"] = link
+            st.session_state["latest_invite_token"] = t  # ✅ stable per invite
 
         link = st.session_state.get("latest_invite_link", "")
+        token_for_key = st.session_state.get("latest_invite_token", "") or (link[-10:] if link else "na")
+
         if link:
             st.text_input("Invite link", value=link, disabled=True, key="invite_link_box")
-            _clipboard_button("Copy invite link", link, key=f"invite_{link[-10:]}")
+            _clipboard_button("Copy invite link", link, key=f"invite_{token_for_key}")
             st.caption("Copy and send the full link to the other person.")
 
 
@@ -641,10 +659,6 @@ if page == "Report":
     render_change_tracking(rid, QUESTIONS)
     render_memory(rid)
     st.stop()
-
-# -------------------- ASSESS --------------------
-# (unchanged below...)
-
 
 
 # -------------------- ASSESS --------------------
