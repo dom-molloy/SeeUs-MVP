@@ -58,16 +58,25 @@ except ModuleNotFoundError:
     )
 
 # ✅ package-safe import so Streamlit Cloud doesn't load a different bugs.py
-from seeus_mvp.bugs import (
-    init_bugs_table,
-    create_bug,
-    list_bugs,
-    get_bug,
-    update_bug,
-    BUG_STATUSES,
-    SEVERITIES,
-    bug_metrics,
-)
+try:
+    from seeus_mvp.bugs import (
+        init_bugs_table,
+        create_bug, list_bugs, get_bug, update_bug,
+        BUG_STATUSES, SEVERITIES, bug_metrics,
+    )
+except ModuleNotFoundError:
+    from bugs import (
+        init_bugs_table,
+        create_bug, list_bugs, get_bug, update_bug,
+        BUG_STATUSES, SEVERITIES, bug_metrics,
+    )
+
+
+
+
+
+
+
 
 from seeus_mvp.scoring import score_solo, score_duo, overall_score
 from seeus_mvp.llm_scoring import score_duo_llm, overall_from_llm
