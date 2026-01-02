@@ -403,7 +403,7 @@ else:
     selected = st.selectbox("Relationship", ["(new)"] + rel_labels, key="rel_select")
     if selected == "(new)":
         st.subheader("Create a relationship")
-        label = st.text_input("Label (e.g., 'Me + Bee')", key="new_rel_label")
+        label = st.text_input("Label (e.g., 'Me + Jane')", key="new_rel_label")
         other_id = st.text_input("Other person ID (optional)", key="new_rel_other")
         if st.button("Create", key="create_rel_btn"):
             if not st.session_state.get("user_id"):
