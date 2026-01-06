@@ -105,7 +105,7 @@ st.set_page_config(page_title="SeeUs MVP", layout="centered")
 
 BASE_APP_URL = (
     (os.getenv("BASE_APP_URL") or "").strip()
-    or "https://seeus-mvp-nfbw9pe3pclpgw4kchx9gh.streamlit.app"
+    or "https://seeusbugs.streamlit.app/"
 )
 DEFAULT_QUESTIONS_URL = (
     "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
