@@ -1,3 +1,4 @@
+# seeus_mvp/app.py
 import sys
 from pathlib import Path
 
@@ -70,14 +71,24 @@ except ModuleNotFoundError:
 try:
     from seeus_mvp.bugs import (
         init_bugs_table,
-        create_bug, list_bugs, get_bug, update_bug,
-        BUG_STATUSES, SEVERITIES, bug_metrics,
+        create_bug,
+        list_bugs,
+        get_bug,
+        update_bug,
+        BUG_STATUSES,
+        SEVERITIES,
+        bug_metrics,
     )
 except ModuleNotFoundError:
     from bugs import (
         init_bugs_table,
-        create_bug, list_bugs, get_bug, update_bug,
-        BUG_STATUSES, SEVERITIES, bug_metrics,
+        create_bug,
+        list_bugs,
+        get_bug,
+        update_bug,
+        BUG_STATUSES,
+        SEVERITIES,
+        bug_metrics,
     )
 
 from seeus_mvp.scoring import score_solo, score_duo, overall_score
@@ -103,7 +114,6 @@ except Exception:
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="SeeUs MVP", layout="centered")
 
-# Normalize BASE_APP_URL so invite links don’t end up with double slashes
 BASE_APP_URL = ((os.getenv("BASE_APP_URL") or "").strip() or "https://seeusbugs.streamlit.app").rstrip("/")
 DEFAULT_QUESTIONS_URL = (
     "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
@@ -140,7 +150,6 @@ def _get_query_param(name: str):
 # ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
 @st.cache_resource(show_spinner=False)
 def _bootstrap():
-    # Keep in one place; cached so it doesn't re-run every rerun.
     init_db()
     init_bugs_table()
     return True
@@ -242,11 +251,14 @@ def _prompt_for(q, tone: str) -> str:
 
 def _is_archived_row(r) -> bool:
     try:
-        # sqlite Row supports mapping but not always .get()
-        val = r["is_archived"] if "is_archived" in r.keys() else 0
+        # sqlite3.Row supports key access; dict may be passed in some contexts
+        val = r["is_archived"] if hasattr(r, "keys") and "is_archived" in r.keys() else r.get("is_archived", 0)
         return int(val or 0) == 1
     except Exception:
-        return False
+        try:
+            return int(r.get("is_archived") or 0) == 1
+        except Exception:
+            return False
 
 
 # -------------------- INVITE LOCKING --------------------
@@ -261,29 +273,20 @@ forced_respondent = invite["respondent"] if invite else None
 
 
 # -------------------- BUG TRACKER UI --------------------
-def _bug_pk(b: dict) -> str:
-    """
-    Bugs table schema uses 'id'. Some older code used 'bug_id'.
-    Support both so UI doesn't break.
-    """
-    return (b.get("bug_id") or b.get("id") or b.get("pk") or "").strip()
-
-
 def render_bug_tracker(current_user: str):
     st.header("🐞 Bug Tracker")
 
+    # Use real count so it never disagrees with visible list
+    all_bugs = list_bugs(status=None, severity=None) or []
     m = bug_metrics() or {"open_critical": 0, "by_status": {}}
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Open Critical", m.get("open_critical", 0))
-    total_by_status = (m.get("by_status") or {})
-    c2.metric("Total", sum(total_by_status.values()) if total_by_status else 0)
+    c2.metric("Total", len(all_bugs))
 
-    # robust “closed” count (supports different naming conventions)
+    by_status = (m.get("by_status") or {})
     closed_like = {"Closed", "Completed", "Done", "Verified", "Resolved", "Rejected"}
-    c3.metric(
-        "Closed",
-        sum(v for k, v in (total_by_status or {}).items() if str(k) in closed_like),
-    )
+    c3.metric("Closed", sum(v for k, v in by_status.items() if str(k) in closed_like))
 
     st.divider()
 
@@ -308,7 +311,6 @@ def render_bug_tracker(current_user: str):
     with f2:
         sev_ui = st.selectbox("Filter by severity", ["All"] + SEVERITIES, key="bug_filter_sev")
 
-    # ✅ Important: pass None instead of "All" to the DB layer
     status = None if status_ui == "All" else status_ui
     sev = None if sev_ui == "All" else sev_ui
 
@@ -317,26 +319,28 @@ def render_bug_tracker(current_user: str):
         st.info("No items match your filters.")
         return
 
-    # Use stable id handling
-    labels = {}
-    for b in bugs:
-        pk = _bug_pk(b)
-        title = b.get("title", "(no title)")
-        stt = b.get("status", "New")
-        svv = b.get("severity", "Medium")
-        labels[f"[{stt}] ({svv}) {title}"] = pk
+    def _bug_label(b: dict) -> str:
+        no = b.get("bug_no")
+        no_txt = f"#{no} " if no is not None else ""
+        return f"{no_txt}[{b.get('status','New')}] ({b.get('severity','Medium')}) {b.get('title','(no title)')}"
 
-    choice = st.selectbox("Select", list(labels.keys()), key="bug_select")
-    bug_id = labels[choice]
+    # ✅ No dict-key overwrite: select directly from list
+    choice = st.selectbox("Select", bugs, format_func=_bug_label, key="bug_select")
+    bug_id = (choice.get("id") or "").strip()
     bug = get_bug(bug_id)
     if not bug:
         st.error(f"Bug not found (id={bug_id}).")
         return
 
     st.write("### Details")
+    st.caption(f"Bug: #{bug.get('bug_no', '—')}  •  ID: {bug.get('id','')[:8]}")
     st.write(bug.get("description") or "")
 
     with st.form("bug_update_form"):
+        # ✅ editable title/description
+        title = st.text_input("Title", bug.get("title", ""), key="bug_edit_title")
+        desc = st.text_area("Description", bug.get("description", ""), key="bug_edit_desc")
+
         new_status = st.selectbox(
             "Status",
             BUG_STATUSES,
@@ -351,9 +355,12 @@ def render_bug_tracker(current_user: str):
         )
         assignee = st.text_input("Assignee", bug.get("assignee") or "", key="bug_assignee")
         notes = st.text_area("Resolution Notes", bug.get("resolution_notes") or "", key="bug_notes")
+
         if st.form_submit_button("Save changes"):
             update_bug(
-                _bug_pk(bug) or bug_id,
+                bug_id,
+                title=title,
+                description=desc,
                 status=new_status,
                 severity=new_sev,
                 assignee=assignee,
@@ -550,8 +557,6 @@ if page == "Growth":
     render_growth_dashboard(rid, mode=sess_mode, respondent=resp)
     st.stop()
 
-# (Everything below remains unchanged from your original file)
-# -------------------- REPORT --------------------
 if page == "Report":
     st.header("Report (MVP)")
 
@@ -640,7 +645,9 @@ if page == "Report":
         amap = latest_map(rows_a)
         bmap = latest_map(rows_b)
 
-        use_llm = st.toggle("Use LLM scoring (OpenAI)", value=False, help="Requires OPENAI_API_KEY.", key="use_llm_duo")
+        use_llm = st.toggle(
+            "Use LLM scoring (OpenAI)", value=False, help="Requires OPENAI_API_KEY.", key="use_llm_duo"
+        )
         model = st.text_input("Model", value="gpt-4o-mini", key="llm_model_duo")
 
         if use_llm:
@@ -864,12 +871,8 @@ next_qid = _next_question_id()
 if next_qid is None:
     st.success(f"{respondent} is done for this session.")
     if sess_mode == "duo":
-        done_a = all(
-            [qid in set([r["question_id"] for r in rows_all if r["respondent"] == "A"]) for qid in PRIMARY_IDS]
-        )
-        done_b = all(
-            [qid in set([r["question_id"] for r in rows_all if r["respondent"] == "B"]) for qid in PRIMARY_IDS]
-        )
+        done_a = all([qid in set([r["question_id"] for r in rows_all if r["respondent"] == "A"]) for qid in PRIMARY_IDS])
+        done_b = all([qid in set([r["question_id"] for r in rows_all if r["respondent"] == "B"]) for qid in PRIMARY_IDS])
         if done_a and done_b:
             st.success("Both A and B are done. Go to **Report**.")
         else:
