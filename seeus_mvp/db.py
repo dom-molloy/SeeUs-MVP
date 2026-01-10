@@ -167,6 +167,22 @@ def init_db():
         if "is_archived" not in cols_rels:
             c.execute("ALTER TABLE relationships ADD COLUMN is_archived INTEGER DEFAULT 0")
 
+        # ✅ --- bugs migrations (for existing DBs) ---
+        cols_bugs = [r["name"] for r in c.execute("PRAGMA table_info(bugs)").fetchall()]
+
+        if "updated_at" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN updated_at TEXT")
+        if "reporter" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN reporter TEXT")
+        if "assignee" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN assignee TEXT")
+        if "resolution_notes" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN resolution_notes TEXT")
+        if "severity" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN severity TEXT")
+        if "status" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN status TEXT")
+
 
 def upsert_user(user_id, display_name):
     with conn() as c:
@@ -451,5 +467,3 @@ def list_growth_reflections(relationship_id, respondent=None, limit=50):
             """,
             (relationship_id, limit),
         ).fetchall()
-
-
