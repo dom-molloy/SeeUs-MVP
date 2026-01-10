@@ -1,4 +1,4 @@
-# seeus_mvp/app.py hi
+# seeus_mvp/app.py
 
 # Optional: load .env locally. Safe on Streamlit Cloud even if python-dotenv isn't installed.
 try:
