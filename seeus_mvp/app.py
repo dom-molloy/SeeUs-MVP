@@ -103,10 +103,8 @@ except Exception:
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="SeeUs MVP", layout="centered")
 
-BASE_APP_URL = (
-    (os.getenv("BASE_APP_URL") or "").strip()
-    or "https://seeusbugs.streamlit.app/"
-)
+# Normalize BASE_APP_URL so invite links don’t end up with double slashes
+BASE_APP_URL = ((os.getenv("BASE_APP_URL") or "").strip() or "https://seeusbugs.streamlit.app").rstrip("/")
 DEFAULT_QUESTIONS_URL = (
     "https://raw.githubusercontent.com/dom-molloy/SeeUs-Question-Bank/main/questions_bank.json"
 )
@@ -140,15 +138,17 @@ def _get_query_param(name: str):
 
 
 # ✅ Avoid blocking/hanging on reruns + surface init errors instead of “loading forever”
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _bootstrap():
+    # Keep in one place; cached so it doesn't re-run every rerun.
     init_db()
     init_bugs_table()
     return True
 
 
 try:
-    _bootstrap()
+    with st.spinner("Initializing database..."):
+        _bootstrap()
 except Exception as e:
     st.error("Startup failed during initialization.")
     st.exception(e)
@@ -242,7 +242,9 @@ def _prompt_for(q, tone: str) -> str:
 
 def _is_archived_row(r) -> bool:
     try:
-        return int(r.get("is_archived") or 0) == 1
+        # sqlite Row supports mapping but not always .get()
+        val = r["is_archived"] if "is_archived" in r.keys() else 0
+        return int(val or 0) == 1
     except Exception:
         return False
 
@@ -259,16 +261,28 @@ forced_respondent = invite["respondent"] if invite else None
 
 
 # -------------------- BUG TRACKER UI --------------------
+def _bug_pk(b: dict) -> str:
+    """
+    Bugs table schema uses 'id'. Some older code used 'bug_id'.
+    Support both so UI doesn't break.
+    """
+    return (b.get("bug_id") or b.get("id") or b.get("pk") or "").strip()
+
+
 def render_bug_tracker(current_user: str):
     st.header("🐞 Bug Tracker")
 
     m = bug_metrics() or {"open_critical": 0, "by_status": {}}
     c1, c2, c3 = st.columns(3)
     c1.metric("Open Critical", m.get("open_critical", 0))
-    c2.metric("Total", sum((m.get("by_status") or {}).values()) if m.get("by_status") else 0)
+    total_by_status = (m.get("by_status") or {})
+    c2.metric("Total", sum(total_by_status.values()) if total_by_status else 0)
+
+    # robust “closed” count (supports different naming conventions)
+    closed_like = {"Closed", "Completed", "Done", "Verified", "Resolved", "Rejected"}
     c3.metric(
         "Closed",
-        (m.get("by_status") or {}).get("Completed", 0) + (m.get("by_status") or {}).get("Rejected", 0),
+        sum(v for k, v in (total_by_status or {}).items() if str(k) in closed_like),
     )
 
     st.divider()
@@ -290,20 +304,33 @@ def render_bug_tracker(current_user: str):
 
     f1, f2 = st.columns(2)
     with f1:
-        status = st.selectbox("Filter by status", ["All"] + BUG_STATUSES, key="bug_filter_status")
+        status_ui = st.selectbox("Filter by status", ["All"] + BUG_STATUSES, key="bug_filter_status")
     with f2:
-        sev = st.selectbox("Filter by severity", ["All"] + SEVERITIES, key="bug_filter_sev")
+        sev_ui = st.selectbox("Filter by severity", ["All"] + SEVERITIES, key="bug_filter_sev")
+
+    # ✅ Important: pass None instead of "All" to the DB layer
+    status = None if status_ui == "All" else status_ui
+    sev = None if sev_ui == "All" else sev_ui
 
     bugs = list_bugs(status=status, severity=sev) or []
     if not bugs:
         st.info("No items match your filters.")
         return
 
-    labels = {f"[{b['status']}] ({b['severity']}) {b['title']}": b["bug_id"] for b in bugs}
+    # Use stable id handling
+    labels = {}
+    for b in bugs:
+        pk = _bug_pk(b)
+        title = b.get("title", "(no title)")
+        stt = b.get("status", "New")
+        svv = b.get("severity", "Medium")
+        labels[f"[{stt}] ({svv}) {title}"] = pk
+
     choice = st.selectbox("Select", list(labels.keys()), key="bug_select")
-    bug = get_bug(labels[choice])
+    bug_id = labels[choice]
+    bug = get_bug(bug_id)
     if not bug:
-        st.error("Bug not found.")
+        st.error(f"Bug not found (id={bug_id}).")
         return
 
     st.write("### Details")
@@ -313,20 +340,20 @@ def render_bug_tracker(current_user: str):
         new_status = st.selectbox(
             "Status",
             BUG_STATUSES,
-            index=max(0, BUG_STATUSES.index(bug["status"])) if bug.get("status") in BUG_STATUSES else 0,
+            index=max(0, BUG_STATUSES.index(bug.get("status"))) if bug.get("status") in BUG_STATUSES else 0,
             key="bug_new_status",
         )
         new_sev = st.selectbox(
             "Severity",
             SEVERITIES,
-            index=max(0, SEVERITIES.index(bug["severity"])) if bug.get("severity") in SEVERITIES else 0,
+            index=max(0, SEVERITIES.index(bug.get("severity"))) if bug.get("severity") in SEVERITIES else 0,
             key="bug_new_sev",
         )
         assignee = st.text_input("Assignee", bug.get("assignee") or "", key="bug_assignee")
         notes = st.text_area("Resolution Notes", bug.get("resolution_notes") or "", key="bug_notes")
         if st.form_submit_button("Save changes"):
             update_bug(
-                bug["bug_id"],
+                _bug_pk(bug) or bug_id,
                 status=new_status,
                 severity=new_sev,
                 assignee=assignee,
@@ -523,6 +550,8 @@ if page == "Growth":
     render_growth_dashboard(rid, mode=sess_mode, respondent=resp)
     st.stop()
 
+# (Everything below remains unchanged from your original file)
+# -------------------- REPORT --------------------
 if page == "Report":
     st.header("Report (MVP)")
 
