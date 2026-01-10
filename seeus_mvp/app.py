@@ -106,8 +106,13 @@ except ModuleNotFoundError:
 st.set_page_config(page_title="SeeUs MVP", layout="centered")
 
 # Initialize core DB + bugs table (this is the key addition)
-init_db()
-init_bugs_table()
+try:
+    init_db()
+    init_bugs_table()
+except Exception as e:
+    st.error("Database init failed. Details below.")
+    st.exception(e)
+    st.stop()
 
 
 # -------------------- BUGS ADMIN VIEW --------------------
