@@ -1,4 +1,3 @@
-# seeus_mvp/bugs.py
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -29,23 +28,12 @@ def _get_columns(c, table: str) -> List[str]:
 
 def init_bugs_table():
     """
-    Ensures the bugs table exists and matches the schema defined in db.py.
-
-    Canonical schema (aligned to db.py):
-      - id (TEXT PRIMARY KEY)
-      - title, description (TEXT NOT NULL)
-      - reporter (TEXT)
-      - severity (TEXT)
-      - status (TEXT)
-      - assignee (TEXT)
-      - resolution_notes (TEXT)
-      - created_at (TEXT)
-      - updated_at (TEXT)
-
-    Migration behavior:
-      - If bugs missing: create it
-      - If bugs exists with old schema (bug_id/created_by/tags_json): migrate data into canonical schema
-      - If bugs exists missing updated_at: add column
+    Canonical schema aligned to db.py:
+      id (TEXT PK)
+      bug_no (INTEGER)
+      title/description
+      reporter/severity/status/assignee/resolution_notes
+      created_at/updated_at
     """
     with conn() as c:
         if not _table_exists(c, "bugs"):
@@ -53,6 +41,7 @@ def init_bugs_table():
                 """
                 CREATE TABLE IF NOT EXISTS bugs (
                     id TEXT PRIMARY KEY,
+                    bug_no INTEGER,
                     title TEXT NOT NULL,
                     description TEXT NOT NULL,
                     reporter TEXT,
@@ -65,75 +54,22 @@ def init_bugs_table():
                 );
                 """
             )
-        else:
-            cols = set(_get_columns(c, "bugs"))
 
-            # --- Migrate from old schema used by previous bugs.py (bug_id/created_by/tags_json) ---
-            old_schema = {"bug_id", "created_by", "tags_json"}
-            canonical_min = {"id", "title", "description", "created_at"}  # minimal proof of new schema
+        cols = set(_get_columns(c, "bugs"))
 
-            if old_schema.intersection(cols) and not canonical_min.issubset(cols):
-                # Create canonical table and map columns across
-                c.execute("DROP TABLE IF EXISTS bugs_new;")
-                c.execute(
-                    """
-                    CREATE TABLE bugs_new (
-                        id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        description TEXT NOT NULL,
-                        reporter TEXT,
-                        severity TEXT,
-                        status TEXT,
-                        assignee TEXT,
-                        resolution_notes TEXT,
-                        created_at TEXT,
-                        updated_at TEXT
-                    );
-                    """
-                )
+        # Ensure columns exist (defensive migrations)
+        if "bug_no" not in cols:
+            c.execute("ALTER TABLE bugs ADD COLUMN bug_no INTEGER")
+            c.execute("UPDATE bugs SET bug_no = COALESCE(bug_no, rowid) WHERE bug_no IS NULL")
 
-                # Copy + map overlapping fields:
-                # old.bug_id -> new.id
-                # old.created_by -> new.reporter
-                # old.created_at -> new.created_at
-                # old.title/description/severity/status/assignee/resolution_notes -> same if present
-                # updated_at -> null (or created_at)
-                copy_sql = """
-                    INSERT INTO bugs_new (
-                        id, title, description, reporter, severity, status,
-                        assignee, resolution_notes, created_at, updated_at
-                    )
-                    SELECT
-                        COALESCE(bug_id, id),
-                        COALESCE(title, '(missing title)'),
-                        COALESCE(description, '(missing description)'),
-                        COALESCE(created_by, reporter),
-                        COALESCE(severity, 'Medium'),
-                        COALESCE(status, 'New'),
-                        assignee,
-                        resolution_notes,
-                        created_at,
-                        COALESCE(updated_at, created_at)
-                    FROM bugs;
-                """
-                c.execute(copy_sql)
+        if "updated_at" not in cols:
+            c.execute("ALTER TABLE bugs ADD COLUMN updated_at TEXT")
 
-                c.execute("DROP TABLE bugs;")
-                c.execute("ALTER TABLE bugs_new RENAME TO bugs;")
-
-            # --- Ensure updated_at exists on canonical table ---
-            cols2 = set(_get_columns(c, "bugs"))
-            if "updated_at" not in cols2:
-                c.execute("ALTER TABLE bugs ADD COLUMN updated_at TEXT")
-
-            # Also ensure created_at exists (defensive)
-            if "created_at" not in cols2:
-                c.execute("ALTER TABLE bugs ADD COLUMN created_at TEXT")
-
-        # Indexes (safe to run repeatedly)
+        # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_severity ON bugs(severity);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_bugs_updated ON bugs(updated_at);")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_bug_no ON bugs(bug_no);")
 
 
 def create_bug(
@@ -145,17 +81,22 @@ def create_bug(
     bug_id = str(uuid.uuid4())
     created = now_iso()
     sev = severity if severity in SEVERITIES else "Medium"
+
     with conn() as c:
+        row = c.execute("SELECT COALESCE(MAX(bug_no), 0) + 1 AS next_no FROM bugs").fetchone()
+        next_no = int(row["next_no"]) if row and row["next_no"] is not None else 1
+
         c.execute(
             """
             INSERT INTO bugs (
-                id, title, description, reporter, severity, status,
+                id, bug_no, title, description, reporter, severity, status,
                 assignee, resolution_notes, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bug_id,
+                next_no,
                 (title or "").strip(),
                 (description or "").strip(),
                 (reporter or "").strip() or None,
@@ -185,8 +126,7 @@ def list_bugs(status: Optional[str] = None, severity: Optional[str] = None) -> L
     if clauses:
         q += " WHERE " + " AND ".join(clauses)
 
-    # Most recently updated first
-    q += " ORDER BY COALESCE(updated_at, created_at) DESC"
+    q += " ORDER BY COALESCE(bug_no, 999999999) DESC, COALESCE(updated_at, created_at) DESC"
 
     with conn() as c:
         return [dict(r) for r in c.execute(q, params).fetchall()]
@@ -200,6 +140,8 @@ def get_bug(bug_id: str) -> Optional[Dict[str, Any]]:
 
 def update_bug(
     bug_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
     status: Optional[str] = None,
     assignee: Optional[str] = None,
     resolution_notes: Optional[str] = None,
@@ -208,24 +150,33 @@ def update_bug(
     sets = []
     params: List[Any] = []
 
+    if title is not None:
+        sets.append("title=?")
+        params.append((title or "").strip())
+
+    if description is not None:
+        sets.append("description=?")
+        params.append((description or "").strip())
+
     if status is not None:
         sets.append("status=?")
-        params.append(status if status in BUG_STATUSES else status)
+        params.append(status)
+
     if assignee is not None:
         sets.append("assignee=?")
         params.append((assignee or "").strip() or None)
+
     if resolution_notes is not None:
         sets.append("resolution_notes=?")
         params.append((resolution_notes or "").strip() or None)
+
     if severity is not None:
-        sev = severity if severity in SEVERITIES else severity
         sets.append("severity=?")
-        params.append(sev)
+        params.append(severity)
 
     if not sets:
         return
 
-    # Always touch updated_at on updates
     sets.append("updated_at=?")
     params.append(now_iso())
 
@@ -243,13 +194,12 @@ def bug_metrics() -> Dict[str, Any]:
             GROUP BY status
             """
         ).fetchall()
-
-        by_status: Dict[str, int] = {}
+        by_status = {}
         for r in rows:
             try:
-                by_status[str(r["status"])] = int(r["n"])
+                by_status[r["status"]] = int(r["n"])
             except Exception:
-                by_status[str(r[0])] = int(r[1])
+                by_status[r[0]] = int(r[1])
 
         crit_open = c.execute(
             """
