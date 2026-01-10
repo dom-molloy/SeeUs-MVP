@@ -130,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_invites_rel ON invites(relationship_id);
 -- --- Bug Tracker ---
 CREATE TABLE IF NOT EXISTS bugs (
     id TEXT PRIMARY KEY,
+    bug_no INTEGER,
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     reporter TEXT,
@@ -144,6 +145,7 @@ CREATE TABLE IF NOT EXISTS bugs (
 CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status);
 CREATE INDEX IF NOT EXISTS idx_bugs_severity ON bugs(severity);
 CREATE INDEX IF NOT EXISTS idx_bugs_updated ON bugs(updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_bug_no ON bugs(bug_no);
 """
 
 
@@ -182,6 +184,15 @@ def init_db():
             c.execute("ALTER TABLE bugs ADD COLUMN severity TEXT")
         if "status" not in cols_bugs:
             c.execute("ALTER TABLE bugs ADD COLUMN status TEXT")
+
+        # ✅ bug numbers
+        cols_bugs = [r["name"] for r in c.execute("PRAGMA table_info(bugs)").fetchall()]
+        if "bug_no" not in cols_bugs:
+            c.execute("ALTER TABLE bugs ADD COLUMN bug_no INTEGER")
+            # Backfill existing rows to have a usable number
+            c.execute("UPDATE bugs SET bug_no = COALESCE(bug_no, rowid) WHERE bug_no IS NULL")
+
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_bug_no ON bugs(bug_no);")
 
 
 def upsert_user(user_id, display_name):
